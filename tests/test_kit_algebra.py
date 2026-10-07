@@ -171,7 +171,7 @@ def test_exact_mod_gives_the_non_negative_residue():
     assert run("exact", expr="-7", mod=5).result["value"] == "3"
 
 
-def test_exact_a_tower_is_reduced_without_building_it():
+def test_exact_powmod_is_reduced_without_building_it():
     # 7**(10**18) would never finish if it were built first
     ev = run("exact", expr="powmod(7, 10**18, 1000)")
     assert ev.result["value"] == str(pow(7, 10**18, 1000))
@@ -204,7 +204,7 @@ def test_exact_compare_of_a_huge_integer_serialises():
     json.dumps(ev.to_dict())  # no 5000-digit int in the JSON
 
 
-@pytest.mark.parametrize("expr", ["2**", "((", "1 +* 2", "", "   ", "__import__('os')", "n_order(2, 4)"])
+@pytest.mark.parametrize("expr", ["2**", "((", "1 +* 2", "", "   ", "__import__(\x27os\x27)", "n_order(2, 4)"])
 def test_exact_unparseable_input_is_flagged_not_raised(expr):
     ev = run("exact", expr=expr)
     assert "bad_input" in codes(ev) and ev.complete is False
@@ -428,7 +428,7 @@ def test_cas_solution_sets_compare_without_regard_to_order():
 @pytest.mark.parametrize("inp", [
     dict(op="factor", expr="x**"),
     dict(op="factor", expr="(x + "),
-    dict(op="factor", expr="__import__('os')"),
+    dict(op="factor", expr="__import__(\x27os\x27)"),
     dict(op="limit", expr="sin(x)/x", var="x"),                      # no point
     dict(op="sum", expr="k", var="k", lower="1"),                    # no upper bound
     dict(op="sum", expr="k*m", lower="1", upper="3"),                # which variable?
@@ -647,7 +647,7 @@ def test_identity_proposed_gives_a_compare():
 @pytest.mark.parametrize("inp", [
     dict(lhs="x**", rhs="x", vars=["x"]),
     dict(lhs="x", rhs="(x +", vars=["x"]),
-    dict(lhs="__import__('os')", rhs="1"),
+    dict(lhs="__import__(\x27os\x27)", rhs="1"),
     dict(lhs="x > 1", rhs="x", vars=["x"]),                            # not an expression
     dict(lhs="x", rhs="x", vars=["x"], domain={"x": "gibberish"}),
     dict(lhs="x", rhs="x", vars=["x"], domain={"x": "integer in (1, 2)"}),   # empty
@@ -716,3 +716,115 @@ def test_identity_runs_in_a_child_process_under_the_budget_with_the_same_seeded_
     assert ev.complete and ev.budget["stopped"] is False
     assert ev.result == inproc.result and ev.seed == 9
     assert ev.scope == inproc.scope and ev.examples == inproc.examples
+
+
+# ---------------------------------------------------------------- review round 1
+
+
+_EVIL = ('S("_"*2+"imp"+"ort"+"_"*2+"(\x27os\x27).getpid()")',
+         'Integer(0)*S("_"*2+"imp"+"ort"+"_"*2+"(\x27os\x27).getpid()")',
+         'sympify("1+1")',
+         "S('1')",
+         'Symbol("x")')
+
+
+@pytest.mark.parametrize("payload", _EVIL)
+def test_a_string_built_at_runtime_is_never_evaluated(payload):
+    for name, inp in (("exact", dict(expr=payload)),
+                      ("cas", dict(op="simplify", expr=payload)),
+                      ("cas", dict(op="solve", expr=payload, vars=["x"])),
+                      ("identity", dict(lhs=payload, rhs="1")),
+                      ("identity", dict(lhs="1", rhs=payload))):
+        ev = run(name, **inp)
+        assert "bad_input" in codes(ev), (name, payload, ev.flags)
+        assert ev.complete is False and ev.result is None
+
+
+@pytest.mark.parametrize("name", ["S", "sympify", "parse_expr", "symbols"])
+def test_no_whitelisted_name_evaluates_a_string(name):
+    assert name not in alg.exact_namespace()
+    assert name not in alg.parsing._whitelist()
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_parse_rejects_any_quote(quote):
+    with pytest.raises(ValueError, match="quote"):
+        alg.parse(f"1 + {quote}2{quote}")
+
+
+def test_exact_mod_of_a_huge_power_finishes_without_building_it():
+    import time
+    t0 = time.perf_counter()
+    ev = run("exact", expr="2**(10**12)", mod=7)
+    assert time.perf_counter() - t0 < 2
+    assert ev.result["value"] == str(pow(2, 10**12, 7)) and ev.complete and not ev.flags
+    assert "modular exponentiation" in ev.scope
+    # nested powers, a sum of them, and the `^` spelling
+    assert run("exact", expr="3^(2^40) + 5*7**(10**15) - 1", mod=1000).result["value"] ==         str((pow(3, 2**40, 1000) + 5 * pow(7, 10**15, 1000) - 1) % 1000)
+    assert run("exact", expr="2**3**4", mod=1000).result["value"] == str(pow(2, 3**4, 1000))
+    assert run("exact", expr="-2**(10**12)", mod=7).result["value"] == str((-pow(2, 10**12, 7)) % 7)
+
+
+def test_exact_mod_after_full_evaluation_says_so():
+    ev = run("exact", expr="factorial(20)", mod=1000)
+    assert ev.result["value"] == str(math.factorial(20) % 1000)
+    assert "after" in notes(ev) and "whole value" in notes(ev)
+    assert "after" not in notes(run("exact", expr="2**100"))
+
+
+def test_exact_an_unevaluated_sum_is_noted():
+    ev = run("exact", expr="Sum(k, (k, 1, 10))")
+    assert "unevaluated" in notes(ev) and "Sum" in notes(ev)
+
+
+def test_exact_no_result_is_flagged_and_incomplete():
+    ev = run("exact", expr="sqrt_mod(3, 7)")
+    assert "no_result" in codes(ev) and ev.complete is False
+    assert ev.result["value"] is None
+
+
+def test_exact_division_by_zero_is_an_undefined_value():
+    for src in ("1/0", "0/0"):
+        ev = run("exact", expr=src)
+        assert "undefined_value" in codes(ev), src
+    assert "undefined_value" not in codes(run("exact", expr="1/3"))
+
+
+def test_cas_a_limit_sympy_gives_up_on_is_not_a_disagreement():
+    ev = run("cas", op="limit", expr="f(x)", var="x", point="0")
+    assert "limits differ" not in notes(ev) and "two-sided limit does not exist" not in notes(ev)
+    assert "could not decide" in notes(ev)
+    ev = run("cas", op="limit", expr="Abs(x)/x", var="x", point="0")
+    assert "does not exist" in notes(ev) and "could not decide" not in notes(ev)
+
+
+@pytest.mark.parametrize("expr", ["x==1", "x == 1", "x>=1 == 2"])
+def test_cas_solve_with_a_double_equals_is_bad_input(expr):
+    ev = run("cas", op="solve", expr=expr, vars=["x"])
+    assert "bad_input" in codes(ev) and ev.complete is False
+    assert "error" not in codes(ev)
+    assert "=" in ev.flags[0]["message"]
+
+
+def test_cas_a_keyword_argument_is_not_an_equation():
+    ev = run("cas", op="simplify", expr="Poly(x**2 + 6, x, modulus=5).as_expr()", vars=["x"])
+    assert "bad_input" not in codes(ev), ev.flags
+    assert ev.result["value"] == "x**2 + 1"
+    ev = run("cas", op="solve", expr="Poly(x**2 - 1, x, modulus=5).as_expr() = 0", vars=["x"])
+    assert "bad_input" not in codes(ev), ev.flags
+    assert sorted(ev.result["value"].strip("[]").split(", ")) == ["-1", "1"]
+
+
+def test_cas_diff_says_it_ignored_point():
+    ev = run("cas", op="diff", expr="x**2", var="x", point="3")
+    assert ev.result["value"] == "2*x"
+    assert "point" in notes(ev) and "ignored" in notes(ev)
+    assert "ignored" not in notes(run("cas", op="diff", expr="x**2", var="x"))
+
+
+def test_cas_limit_at_infinity_says_it_ignored_direction():
+    ev = run("cas", op="limit", expr="1/x", var="x", point="oo", direction="+")
+    assert ev.result["value"] == "0"
+    assert "direction" in notes(ev) and "ignored" in notes(ev)
+    ev = run("cas", op="limit", expr="1/x", var="x", point="0", direction="+")
+    assert "ignored" not in notes(ev)

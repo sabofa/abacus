@@ -59,7 +59,26 @@ _SCHEMA = {
 }
 
 _BAD = (ValueError, TypeError, ZeroDivisionError, ArithmeticError, BasePolynomialError)
-_EQ = re.compile(r"(?<![<>=!])=(?!=)")
+_OPEN, _CLOSE = "([{", ")]}"
+
+
+def _split_equation(s: str) -> list[str]:
+    """Split at a lone '=' outside any brackets, so a keyword argument (evaluate=False) is not an equation."""
+    depth, cuts = 0, []
+    for m in re.finditer(r"[(\[{)\]}]|(?<![<>=!])=(?!=)", s):
+        c = m.group()
+        if c in _OPEN:
+            depth += 1
+        elif c in _CLOSE:
+            depth -= 1
+        elif depth == 0:
+            cuts.append(m.start())
+    parts, last = [], 0
+    for i in cuts:
+        parts.append(s[last:i])
+        last = i + 1
+    parts.append(s[last:])
+    return parts
 
 
 # ----------------------------------------------------------------------------- inputs
@@ -79,13 +98,22 @@ def _symbols(inp: dict) -> tuple[dict, list[str]]:
 
 
 def _parse_item(s: str, syms: dict, rational: bool):
-    """One expression; a lone '=' makes it an equation."""
-    parts = _EQ.split(s)
+    """One expression; a lone '=' (outside brackets) makes it an equation."""
+    parts = _split_equation(s)
     if len(parts) == 1:
-        return alg.parse(s, syms, rational=rational)
+        return _basic(alg.parse(s, syms, rational=rational), s)
     if len(parts) > 2:
         raise ValueError(f"more than one '=' in {s!r}")
-    return sp.Eq(alg.parse(parts[0], syms, rational=rational), alg.parse(parts[1], syms, rational=rational))
+    return sp.Eq(_basic(alg.parse(parts[0], syms, rational=rational), parts[0]),
+                 _basic(alg.parse(parts[1], syms, rational=rational), parts[1]))
+
+
+def _basic(v, s: str):
+    """A parsed item must be a sympy object. `x == 1` is evaluated by Python to a bool, not an equation."""
+    if not isinstance(v, sp.Basic):
+        raise ValueError(f"{s!r} is not an expression or an equation (it gave {v!r}); write an equation with "
+                         f"a single '=', as in x**2 = 4, not '=='")
+    return v
 
 
 def _free(e) -> list:
@@ -122,32 +150,7 @@ def _bound(inp: dict, key: str, syms: dict):
 # ----------------------------------------------------------------------------- result checks
 
 
-def _result_notes(res) -> list[str]:
-    """Say so when sympy's answer is unevaluated, conditional or only bounds (kit/03 s2, kit/04 s2)."""
-    found = list(alg.walk(res))
-    has = lambda *cls: any(b.has(*cls) for b in found)  # noqa: E731
-    out = []
-    for cls, name in ((sp.Integral, "Integral"), (sp.Sum, "Sum"), (sp.Product, "Product"), (sp.Limit, "Limit")):
-        if has(cls):
-            out.append(f"unevaluated {name} in the result: sympy found no closed form (or gave up). That does "
-                       f"not mean none exists, and it is not a proof that none does")
-    if has(sp.Piecewise):
-        out.append("conditional result: the Piecewise lists cases, and each branch holds only where its "
-                   "condition does (read the conditions before using the value)")
-    if has(sp.ConditionSet):
-        out.append("sympy returned a ConditionSet: it could not solve the equation in closed form; the set is "
-                   "the unsolved condition, not a solution")
-    if has(sp.Intersection, sp.Complement):
-        out.append("an unevaluated Intersection or Complement: sympy could not work out the common part of two "
-                   "sets, so the set is not in simplest form (it may be much smaller than it looks)")
-    if has(sp.AccumBounds):
-        out.append("AccumBounds: the function oscillates or has no single limit there; sympy gives the interval "
-                   "it stays in, not a limit")
-    if has(sp.CRootOf):
-        out.append("roots are given as CRootOf: exact, but implicit (no radical form)")
-    if has(sp.nan, sp.zoo):
-        out.append("the result contains zoo or nan (complex infinity, or an undefined form such as 0/0)")
-    return out
+_result_notes = alg.result_notes
 
 
 def _num_key(r):
@@ -263,6 +266,9 @@ def _compute(op: str, inp: dict, syms: dict, exprs: list, notes: list[str]):
         return sp.apart(e, x), None, f"apart in {x}"
 
     if op == "diff":
+        if inp.get("point") is not None:
+            notes.append("`point` was ignored: diff returns the derivative as an expression, it does not "
+                         "evaluate it at a point (differentiate, then substitute, or use limit)")
         x = _one_var(inp, syms, exprs, op)
         n = int(inp.get("order", 1))
         return sp.diff(e, x, n), None, f"diff w.r.t. {x}" + (f", {n} times" if n != 1 else "")
@@ -290,6 +296,9 @@ def _compute(op: str, inp: dict, syms: dict, exprs: list, notes: list[str]):
         x = _one_var(inp, syms, exprs, op)
         p = alg.parse(str(inp["point"]), syms, rational=True)
         d = inp.get("direction", "+-")
+        if p in (sp.oo, -sp.oo) and "direction" in inp:
+            notes.append(f"`direction` {inp['direction']!r} was ignored: at {p} the limit is taken from the "
+                         f"only side there is")
         if p in (sp.oo, -sp.oo) or d != "+-":
             side = "" if p in (sp.oo, -sp.oo) else f" from the {'right' if d == '+' else 'left'}"
             dd = "-" if p == sp.oo else "+" if p == -sp.oo else d
@@ -303,8 +312,12 @@ def _compute(op: str, inp: dict, syms: dict, exprs: list, notes: list[str]):
                 same = False
         if same:
             return right, None, f"limit as {x} -> {p}, from both sides"
-        notes.append("the left and right limits differ, so the two-sided limit does not exist (sympy computed "
-                     "each side separately)")
+        if left.has(sp.Limit, sp.AccumBounds) or right.has(sp.Limit, sp.AccumBounds):
+            notes.append("could not decide: sympy gave up on (or only bounded) one side, so it is not known "
+                         "whether the two sides agree; the unevaluated side is not a different value")
+        else:
+            notes.append("the left and right limits differ, so the two-sided limit does not exist (sympy "
+                         "computed each side separately)")
         lt, rt = alg.render(left)[0], alg.render(right)[0]
         return (left, right), {"value": None, "latex": None, "left": lt, "right": rt}, \
             f"limit as {x} -> {p}, from both sides"

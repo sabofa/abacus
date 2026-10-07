@@ -61,7 +61,7 @@ def test_parse_unknown_name_is_symbol():
     assert parse_expr("y + 1") == sp.Symbol("y") + 1
 
 
-@pytest.mark.parametrize("s", ["__import__('os')", "x.__class__", "lambda: 1",
+@pytest.mark.parametrize("s", ["__import__(\x27os\x27)", "x.__class__", "lambda: 1",
                                "exec('1')", "eval('1')", "open('f')", "'import os'"])
 def test_parse_rejects(s):
     with pytest.raises(ValueError):
@@ -82,3 +82,22 @@ def test_compile_func():
 def test_compile_func_missing_name():
     with pytest.raises(ValueError):
         compile_code("x = 1", kind="func", name="f")
+
+
+@pytest.mark.parametrize("s", [
+    'S("_"*2+"imp"+"ort"+"_"*2+"(\x27os\x27).getpid()")',
+    'Integer(0)*S("_"*2+"imp"+"ort"+"_"*2+"(\x27os\x27).getpid()")',
+    'sympify("1+1")',
+    "S('1')",
+    "Symbol('x')",
+    "1 + 'a'",
+])
+def test_parse_rejects_runtime_built_strings(s):
+    with pytest.raises(ValueError):
+        parse_expr(s)
+
+
+@pytest.mark.parametrize("name", ["S", "sympify", "parse_expr", "symbols"])
+def test_whitelist_has_no_name_that_evaluates_a_string(name):
+    from abacus import parsing
+    assert name not in parsing._NAMES and name not in parsing._whitelist()

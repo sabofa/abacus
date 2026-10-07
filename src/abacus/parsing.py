@@ -20,11 +20,29 @@ asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp log ln floor ceiling f
 prime primepi nextprime prevprime totient mobius reduced_totient Sum Product Integral Derivative
 Limit diff integrate limit summation product simplify expand factor cancel apart together
 Abs sign Min Max re im conjugate arg fibonacci lucas catalan bell harmonic gamma beta zeta
-Matrix Eq Ne Lt Le Gt Ge And Or Not Piecewise Symbol symbols S Poly Function Lambda
+Matrix Eq Ne Lt Le Gt Ge And Or Not Piecewise Symbol Poly Function Lambda
 legendre_symbol jacobi_symbol n_order primitive_root igcd ilcm
 """.split()
 
 _BAD_SUBSTRINGS = ("__", "import", "lambda", "exec", "eval", "open")
+
+# No expression may contain a string literal. Sympy's own parser (sympify) evaluates a string argument
+# with full builtins, so a string built at runtime (S("_"*2+"imp"+...)) would get past the text scan
+# above. S, sympify, parse_expr and symbols (which evaluate or split a string) are not in _NAMES either.
+# Symbol and Function stay: sympy's own auto_symbol transform emits calls to them for every bare name.
+# They only store the string, and with no string literal possible they can only be handed a name.
+QUOTE_CHARS = ("'", '"')
+
+
+def check_text(s: str) -> None:
+    """Raise ValueError for text that must never reach the evaluator."""
+    low = s.lower()
+    for bad in _BAD_SUBSTRINGS:
+        if bad in low:
+            raise ValueError(f"expression rejected: contains {bad!r}")
+    if any(q in s for q in QUOTE_CHARS):
+        raise ValueError("expression rejected: contains a quote character; string literals are not "
+                         "allowed (write names bare: x, not 'x')")
 
 
 def _whitelist() -> dict:
@@ -34,10 +52,7 @@ def _whitelist() -> dict:
 
 
 def parse_expr(s: str, symbols: Iterable[str] = ()) -> sp.Expr:
-    low = s.lower()
-    for bad in _BAD_SUBSTRINGS:
-        if bad in low:
-            raise ValueError(f"expression rejected: contains {bad!r}")
+    check_text(s)
     local = {n: sp.Symbol(n) for n in symbols}
     try:
         return _sympy_parse(s, local_dict=local, global_dict=_whitelist(),

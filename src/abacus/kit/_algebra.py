@@ -78,10 +78,7 @@ def parse(s: Any, symbols: dict | None = None, namespace: dict | None = None, ra
     """
     if not isinstance(s, str) or not s.strip():
         raise ValueError("the expression is empty")
-    low = s.lower()
-    for bad in parsing._BAD_SUBSTRINGS:
-        if bad in low:
-            raise ValueError(f"expression rejected: contains {bad!r}")
+    parsing.check_text(s)
     try:
         return _sympy_parse(s.strip(), local_dict=dict(symbols or {}),
                             global_dict=dict(namespace) if namespace is not None else parsing._whitelist(),
@@ -126,6 +123,34 @@ def unbound_names(obj: Any) -> tuple[list[str], list[str]]:
         syms |= {s.name for s in b.free_symbols}
         funcs |= {type(a).__name__ for a in b.atoms(AppliedUndef)}
     return sorted(syms), sorted(funcs)
+
+
+def result_notes(res) -> list[str]:
+    """Say so when sympy's answer is unevaluated, conditional or only bounds (kit/03 s2, kit/04 s2)."""
+    found = list(walk(res))
+    has = lambda *cls: any(b.has(*cls) for b in found)  # noqa: E731
+    out = []
+    for cls, name in ((sp.Integral, "Integral"), (sp.Sum, "Sum"), (sp.Product, "Product"), (sp.Limit, "Limit")):
+        if has(cls):
+            out.append(f"unevaluated {name} in the result: sympy found no closed form (or gave up). That does "
+                       f"not mean none exists, and it is not a proof that none does")
+    if has(sp.Piecewise):
+        out.append("conditional result: the Piecewise lists cases, and each branch holds only where its "
+                   "condition does (read the conditions before using the value)")
+    if has(sp.ConditionSet):
+        out.append("sympy returned a ConditionSet: it could not solve the equation in closed form; the set is "
+                   "the unsolved condition, not a solution")
+    if has(sp.Intersection, sp.Complement):
+        out.append("an unevaluated Intersection or Complement: sympy could not work out the common part of two "
+                   "sets, so the set is not in simplest form (it may be much smaller than it looks)")
+    if has(sp.AccumBounds):
+        out.append("AccumBounds: the function oscillates or has no single limit there; sympy gives the interval "
+                   "it stays in, not a limit")
+    if has(sp.CRootOf):
+        out.append("roots are given as CRootOf: exact, but implicit (no radical form)")
+    if has(sp.nan, sp.zoo):
+        out.append("the result contains zoo or nan (complex infinity, or an undefined form such as 0/0)")
+    return out
 
 
 def undefined_function_note(*exprs: Any) -> str | None:
