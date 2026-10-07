@@ -53,6 +53,11 @@ def jsonable(x: Any) -> Any:
 
 def _equal(a: Any, b: Any) -> bool:
     try:
+        if bool(a == b):  # plain equality first: sympify turns two equal sets into a Complement, never 0
+            return True
+    except Exception:  # noqa: BLE001  (an array's == has no single truth value)
+        pass
+    try:
         sa, sb = sp.sympify(a), sp.sympify(b)
         return bool(sp.simplify(sa - sb) == 0)
     except Exception:

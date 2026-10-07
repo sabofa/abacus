@@ -9,7 +9,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from . import __version__, budget, registry, sandbox  # noqa: F401  (sandbox registers `run`)
-from .algo import roles, surface  # noqa: F401  (register algo_role, algo_lint, algo_run)
+from .algo import roles, surface  # noqa: F401  (register algo_lint, algo_run)
 
 
 def list_tools() -> list[types.Tool]:

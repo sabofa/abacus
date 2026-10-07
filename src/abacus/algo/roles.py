@@ -11,7 +11,7 @@ from .loader import AlgoImportError, LoadedAlgo, MetaError, load_algo, validate_
 from .rng import AbacusRNG
 
 RUN_ROLES = ("compute", "check", "generate", "demo", "hand_space")
-BUTTON = "algo_role"  # internal: not a spec button (tests/test_surfaces_agree.py INTERNAL)
+BUTTON = "algo_run"  # an algorithm-file surface, not a spec button (tests/test_surfaces_agree.py INTERNAL)
 
 
 @dataclass
@@ -31,7 +31,9 @@ class Instance:
     signals: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return jsonable({f.name: getattr(self, f.name) for f in fields(self)})
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
+        d["evidence"] = [e.to_dict(full=True) if isinstance(e, Evidence) else e for e in (self.evidence or [])]
+        return jsonable(d)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Instance":
@@ -83,7 +85,10 @@ def _fail(code: str, msg: str, scope: str) -> Evidence:
 
 @registry.button(
     BUTTON,
-    description="Internal: run one role of an algorithm file under the time budget.",
+    description="Run one role (compute, check, generate, demo, hand_space) of an algorithm file under the time "
+                "budget. `args` holds the role's own arguments: params (compute, check, hand_space), "
+                "proposed (check), instance (demo). generate takes `knobs` and, optionally, `seed`; "
+                "the seed it used is recorded in the evidence.",
     input_schema={
         "type": "object",
         "properties": {
@@ -96,7 +101,7 @@ def _fail(code: str, msg: str, scope: str) -> Evidence:
     },
     default_time_s=30,
 )
-def algo_role(inp: dict, ctx) -> Evidence:
+def algo_run(inp: dict, ctx) -> Evidence:
     role, args, knobs = inp["role"], inp.get("args") or {}, inp.get("knobs") or {}
     try:
         algo = load_algo(inp["path"])
@@ -107,12 +112,13 @@ def algo_role(inp: dict, ctx) -> Evidence:
     fn = getattr(algo.module, role, None)
     if not callable(fn):
         return _missing(role, algo)
-    seed = ctx.seed
 
     if role == "generate":
         bad = validate_knobs(algo.meta, knobs)
         if bad:
             return _fail("bad_knobs", "; ".join(bad), "the knob values were rejected, so generate did not run")
+        # With no seed given, draw one and record it in Evidence.seed so the run can be repeated.
+        seed = ctx.seed if ctx.seed is not None else secrets.randbelow(2**32)
         inst = normalise_instance(fn(AbacusRNG(seed), dict(knobs)), algo, seed)
         return Evidence(button=BUTTON, result=inst.to_dict(), method="sampled", seed=seed,
                         scope=f"one instance from generate(rng, knobs) of {algo.meta['id']} [{algo.hash}], seed {seed}")
@@ -137,16 +143,19 @@ def algo_role(inp: dict, ctx) -> Evidence:
                     scope=f"the naive-search size hand_space(params) returned for {algo.meta['id']} [{algo.hash}]")
 
 
-def run_role(algo_path, role: str, *, seed: int | None = None, knobs: dict | None = None,
-             time_s: float | None = None, in_process: bool = False, **args) -> Evidence:
-    """Run one role of an algorithm file. Role arguments go in `args`:
-    compute/hand_space take `params`; check takes `params` and `proposed`; demo takes `instance`."""
+def run_role(algo_path, role: str, *, args: dict | None = None, seed: int | None = None,
+             knobs: dict | None = None, time_s: float | None = None, in_process: bool = False) -> Evidence:
+    """Run one role of an algorithm file. `args` holds the role's own arguments and nothing else:
+    compute/hand_space take `params`; check takes `params` and `proposed`; demo takes `instance`.
+    `seed`, `knobs`, `time_s` and `in_process` steer the run itself and are separate keywords."""
     if role not in RUN_ROLES:
         return _fail("bad_input", f"role must be one of {list(RUN_ROLES)}, got {role!r}",
                      "input rejected before running")
-    if role == "generate" and seed is None:
-        seed = secrets.randbelow(2**32)  # recorded in Evidence.seed, so the run can be repeated
-    if "instance" in args and isinstance(args["instance"], Instance):
+    if args is not None and not isinstance(args, dict):
+        return _fail("bad_input", f"args must be an object, got {type(args).__name__}",
+                     "input rejected before running")
+    args = dict(args or {})
+    if isinstance(args.get("instance"), Instance):
         args["instance"] = args["instance"].to_dict()
     inp: dict = {"path": str(algo_path), "role": role, "knobs": dict(knobs or {}), "args": args}
     if seed is not None:

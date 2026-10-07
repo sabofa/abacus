@@ -20,6 +20,15 @@ def test_seed_drawn_and_respected():
     assert ev.seed == 7 and ev.result == 7 and ev.complete
 
 
+def test_a_seed_the_button_drew_itself_is_kept_and_the_callers_wins():
+    for in_process in (True, False):
+        ev = budget.call("t_own_seed", {}, in_process=in_process, time_s=30)
+        assert ev.seed == 424242 and ev.result == 424242, in_process
+        ev = budget.call("t_own_seed", {"seed": 9}, in_process=in_process, time_s=30)
+        assert ev.seed == 9 and ev.result == 9, in_process
+    assert budget.call("t_schema", {"n": 1}, in_process=True).seed is None
+
+
 def test_bad_input():
     ev = budget.call("t_schema", {"n": "x"})
     assert "bad_input" in codes(ev) and ev.complete is False

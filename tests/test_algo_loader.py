@@ -1,3 +1,5 @@
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -49,6 +51,55 @@ def test_import_error_is_verbatim(tmp_path):
     p = tmp_path / "boom.py"
     p.write_text("raise RuntimeError('kaboom')\n")
     with pytest.raises(AlgoImportError, match="RuntimeError: kaboom"):
+        load_algo(p)
+
+
+def test_import_time_system_exit_is_an_import_error(tmp_path):
+    p = tmp_path / "quits.py"
+    p.write_text("import sys\nsys.exit(3)\n")
+    with pytest.raises(AlgoImportError, match="SystemExit: 3"):
+        load_algo(p)
+    p.write_text("raise SystemExit\n")
+    with pytest.raises(AlgoImportError, match="SystemExit"):
+        load_algo(p)
+
+
+def _meta_src(algo_id: str) -> str:
+    return (f'META = {{"id": "{algo_id}", "title": "T", "summary": "S.", "roles": ["compute"],'
+            ' "answer": {"format": "integer"}}\n\ndef compute(params):\n    return 1\n')
+
+
+def test_load_reads_source_not_bytecode_and_writes_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)  # the environment may have turned it on
+    p = tmp_path / "same_size.py"
+    p.write_text(_meta_src("x.one"), encoding="utf-8")
+    st = p.stat()
+    assert load_algo(p).meta["id"] == "x.one"
+    new = _meta_src("x.two")
+    assert len(new) == len(_meta_src("x.one"))
+    p.write_text(new, encoding="utf-8")
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))  # same size, same mtime: stale bytecode would match
+    assert p.stat().st_mtime_ns == st.st_mtime_ns
+    assert load_algo(p).meta["id"] == "x.two"
+    assert not (tmp_path / "__pycache__").exists()
+    assert not list(tmp_path.rglob("*.pyc"))
+
+
+def test_loaded_module_is_usable_and_keeps_file_info(tmp_path):
+    p = tmp_path / "dc.py"
+    p.write_text(
+        "from dataclasses import dataclass\n"
+        'META = {"id": "x.dc", "title": "T", "summary": "S.", "roles": ["compute"], "answer": {"format": "integer"}}\n'
+        "@dataclass\nclass Box:\n    n: int = 4\n"
+        "def compute(params):\n    return Box().n\n", encoding="utf-8")
+    a = load_algo(p)
+    assert a.module.compute({}) == 4 and Path(a.module.__file__) == p.resolve()
+
+
+def test_syntax_error_is_an_import_error(tmp_path):
+    p = tmp_path / "syn.py"
+    p.write_text("def (:\n")
+    with pytest.raises(AlgoImportError, match="SyntaxError"):
         load_algo(p)
 
 

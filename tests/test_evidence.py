@@ -67,6 +67,19 @@ def test_compare():
     assert make_compare([1, 2], [1, 3])["equal"] is False
 
 
+def test_compare_containers_equal_by_plain_equality():
+    assert make_compare({1, 2}, {1, 2})["equal"] is True
+    assert make_compare({1, 2}, {2, 1})["equal"] is True
+    assert make_compare(frozenset({1, 2}), {1, 2})["equal"] is True
+    assert make_compare((1, 2), (1, 2))["equal"] is True
+    assert make_compare([1, 2], [1, 2])["equal"] is True
+    assert make_compare([(1, 2), {3}], [(1, 2), {3}])["equal"] is True
+    assert make_compare({1, 2}, {1, 3})["equal"] is False
+    assert make_compare({1, 2}, {1, 2, 3})["equal"] is False
+    assert make_compare((1, 2), (1, 3))["equal"] is False
+    assert make_compare([1, 2], [1])["equal"] is False
+
+
 def test_validation():
     with pytest.raises(ValueError):
         ev(scope="")

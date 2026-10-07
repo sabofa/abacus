@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import re
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 ROLES = ("compute", "check", "generate", "solution", "demo", "hand_space")
@@ -35,7 +34,7 @@ class AlgoImportError(Exception):
 @dataclass
 class LoadedAlgo:
     meta: dict
-    module: ModuleType
+    module: types.ModuleType
     path: Path
     hash: str
 
@@ -187,20 +186,28 @@ def validate_knobs(meta: dict, knobs: dict) -> list[str]:
 
 
 def load_algo(path) -> LoadedAlgo:
-    """Import the file at `path` and validate its META. Raises AlgoImportError or MetaError."""
+    """Import the file at `path` and validate its META. Raises AlgoImportError or MetaError.
+
+    The file is compiled from its source text and run in a fresh module, so no bytecode cache is read
+    (a same-size, same-second edit cannot load the old code) and none is written next to the file.
+    An import-time `sys.exit()` is reported as an import error rather than ending the caller.
+    """
     p = Path(path).resolve()
     if not p.is_file():
         raise AlgoImportError(f"no such algorithm file: {p}")
+    try:
+        source = p.read_bytes()
+    except OSError as e:
+        raise AlgoImportError(f"cannot read {p}: {e}") from e
     h = algo_hash(p)
     modname = f"abacus_algo_{h}_{_NONWORD.sub('_', p.stem)}"
-    spec = importlib.util.spec_from_file_location(modname, p)
-    if spec is None or spec.loader is None:
-        raise AlgoImportError(f"cannot import {p} as a Python module")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[modname] = module
+    module = types.ModuleType(modname)
+    module.__file__ = str(p)
+    sys.modules[modname] = module  # the file's own imports (dataclasses, pickle) look its module up by name
     try:
-        spec.loader.exec_module(module)
-    except Exception as e:  # noqa: BLE001
+        code = compile(source, str(p), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102
+    except (Exception, SystemExit) as e:  # noqa: BLE001
         sys.modules.pop(modname, None)
         raise AlgoImportError(f"{type(e).__name__}: {e}") from e
     if not hasattr(module, "META"):

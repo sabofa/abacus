@@ -157,7 +157,9 @@ def call(name: str, inp: dict, *, time_s=None, mem_mb=None, in_process=False, fu
                           scope=last.get("scope") or "stopped at the time budget before any progress", complete=False)
 
     ev.notes.extend(notes)
-    ev.input, ev.seed = jsonable(inp), seed
+    ev.input = jsonable(inp)
+    if seed is not None:  # the caller's seed wins; a seed the button drew itself is kept when there is none
+        ev.seed = seed
     ev.budget = {"time_s": round(time.monotonic() - t0, 3), "limit_s": limit,
                  "stopped": stopped, "mem_enforced": enforced}
     return ev

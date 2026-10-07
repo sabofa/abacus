@@ -62,3 +62,9 @@ def t_polite_late(inp, ctx):
         time.sleep(0.02)
     return Evidence(button="t_polite_late", result="mine-late", method="timed",
                     scope="stopped myself late", complete=False)
+
+
+@_reg("t_own_seed", description="draws its own seed when none was given", input_schema=_ANY)
+def t_own_seed(inp, ctx):
+    seed = ctx.seed if ctx.seed is not None else 424242
+    return Evidence(button="t_own_seed", result=seed, method="sampled", scope="the seed it used", seed=seed)

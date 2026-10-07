@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -67,7 +68,8 @@ def test_input_and_run_file_invalid_bytes_exit_2(tmp_path, capsys):
     assert "abacus:" in capsys.readouterr().err
 
 
-ALGO = "tests/fixtures/algos/nt_power_mod.py"
+FIX = Path(__file__).parent / "fixtures" / "algos"
+ALGO = str(FIX / "nt_power_mod.py")
 
 
 def test_algo_new(tmp_path, capsys):
@@ -95,7 +97,7 @@ def test_algo_show(capsys):
 
 
 def test_algo_list(capsys, tmp_path):
-    assert main(["algo", "list", "tests/fixtures/algos"]) == 0
+    assert main(["algo", "list", str(FIX)]) == 0
     out = capsys.readouterr().out
     assert "nt.power-mod	a to the b mod m	" in out
     assert main(["algo", "list", str(tmp_path / "missing")]) == 0
@@ -110,3 +112,49 @@ def test_algo_run(capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["seed"] == 7 and out["result"]["params"]["m"] == 9
     assert main(["algo", "run", ALGO, "compute", "--args", "[1]"]) == 2
+
+
+def test_algo_run_args_never_collide_with_run_role_keywords(capsys):
+    # these used to be splatted into run_role(**args) and crash with a TypeError
+    stray = {"seed": 1, "role": "x", "knobs": {}, "time_s": 3, "in_process": True, "args": {}}
+    args = dict(stray, params={"a": 3, "b": 4, "m": 5})
+    assert main(["algo", "run", ALGO, "compute", "--args", json.dumps(args)]) == 0
+    assert json.loads(capsys.readouterr().out)["result"] == 1
+    assert main(["algo", "run", ALGO, "generate", "--seed", "4", "--args", '{"seed": 1}']) == 0
+    assert json.loads(capsys.readouterr().out)["seed"] == 4
+
+
+def test_algo_run_generate_without_seed_records_one(capsys):
+    assert main(["algo", "run", ALGO, "generate"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert isinstance(out["seed"], int) and out["result"]["seed"] == out["seed"]
+
+
+def test_algo_files_that_exit_at_import_do_not_kill_show_list_or_lint(tmp_path, capsys):
+    f = tmp_path / "quits.py"
+    f.write_text("import sys\nsys.exit(4)\n", encoding="utf-8")
+    assert main(["algo", "show", str(f)]) == 2
+    assert "SystemExit" in capsys.readouterr().err
+    assert main(["algo", "list", str(tmp_path)]) == 0
+    assert "not loadable" in capsys.readouterr().out
+    assert main(["algo", "lint", str(f)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["result"]["checks"][0]["status"] == "problem" and "SystemExit" in out["result"]["checks"][0]["detail"]
+
+
+def test_algo_lint_runs_under_the_time_budget_so_a_hung_role_is_killed(capsys):
+    assert main(["algo", "lint", str(FIX / "lint_hang.py"), "-k", "2", "--time", "2"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["complete"] is False and out["budget"]["stopped"] is True
+
+
+def test_algo_lint_default_k_is_twenty(capsys):
+    assert main(["algo", "lint", str(FIX / "one_off.py")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["result"]["k"] == 20 and out["complete"] is True
+
+
+def test_buttons_lists_algo_run_and_lint_but_not_algo_role(capsys):
+    assert main(["buttons"]) == 0
+    text = capsys.readouterr().out
+    assert "algo_run\t" in text and "algo_lint\t" in text and "algo_role" not in text

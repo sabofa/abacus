@@ -128,7 +128,7 @@ def _json_arg(text, what):
 
 
 def _algo(rest: list[str]) -> int:
-    from .algo.lint import DEFAULT_K, lint
+    from .algo.lint import DEFAULT_K
     from .algo.loader import AlgoImportError, MetaError, _ID_RE, algo_hash, load_algo
     from .algo.roles import RUN_ROLES, run_role
 
@@ -174,7 +174,8 @@ def _algo(rest: list[str]) -> int:
         print(str(out))
         return 0
     if a.sub == "lint":
-        _emit(lint(a.file, k=a.k, time_s=a.time), a.pretty, True)
+        # Through the budget, so a role that hangs is killed in its child process instead of hanging the terminal.
+        _emit(budget.call("algo_lint", {"path": str(Path(a.file).resolve()), "k": a.k}, time_s=a.time), a.pretty, True)
         return 0
     if a.sub == "show":
         try:
@@ -203,7 +204,7 @@ def _algo(rest: list[str]) -> int:
         knobs, args = _json_arg(a.knobs, "--knobs"), _json_arg(a.args, "--args")
     except ValueError as e:
         return _err(str(e))
-    _emit(run_role(a.file, a.role, seed=a.seed, knobs=knobs, time_s=a.time, **args), a.pretty, a.full)
+    _emit(run_role(a.file, a.role, args=args, seed=a.seed, knobs=knobs, time_s=a.time), a.pretty, a.full)
     return 0
 
 

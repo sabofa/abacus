@@ -5,7 +5,7 @@ from pathlib import Path
 from abacus import cli, mcp_server, registry
 
 SPEC = Path(__file__).resolve().parents[1] / "docs" / "spec" / "kit" / "04-buttons.md"
-INTERNAL = {"run", "algo_role", "algo_lint", "algo_run"}
+INTERNAL = {"run", "algo_lint", "algo_run"}
 
 # Spec buttons that are not built yet. Remove a name here when its button lands.
 PENDING = {
