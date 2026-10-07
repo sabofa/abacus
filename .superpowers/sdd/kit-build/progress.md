@@ -11,7 +11,7 @@
 | T1 Foundation | [x] | f7555a4 c5833dd a4e8c1e; fixes in 93d40ce, 76ae73b | READY after 2 rounds (Sonnet) |
 | T2 Surfaces | [x] | 93d40ce c4e2f5b a030c95; fixes bf16f47, f92e19f | 2 rounds (Sonnet); round 2 (the thread-safe flush) has a deterministic test but no re-review: the cap was reached |
 | T3 Buttons: arithmetic and algebra | [~] round 1 fix fda71bc; hardening fixer running (a07f677d…); needs a final non-adversarial re-review | 8c6e573; fda71bc | Round 1 NOT READY (1 critical: parser string-eval hole). Re-review was cut short by a safety classifier before finishing; it found: `exact` returned Python objects via attribute access, `evidence._equal` sympified raw strings, identity `vars` unvalidated. All three went to the hardening fixer |
-| T4 Buttons: counting and discrete math | [~] round 1 fix 6697a1b; re-review running | a9790c2; 6697a1b | Round 1 NOT READY (3 important: margin error skipped the claim; silent caps; thin holdout) |
+| T4 Buttons: counting and discrete math | [x] | a9790c2; fix 6697a1b | READY after 1 round (Sonnet). Round 1 had 3 important; the re-review confirmed all fixed |
 | T5 Buttons: probability and quant | [ ] | | |
 | T6 Buttons: continuous math | [ ] | | |
 | T7 Buttons: CS | [ ] | | |
@@ -27,7 +27,7 @@ Each subtask's goal, files, test and acceptance line are in the plan. Copy them 
 - [x] T2.1  - [x] T2.2  - [x] T2.3
 - [x] T3.1  - [x] T3.2  - [x] T3.3
 - [x] T4.1  - [x] T4.2  - [x] T4.3
-- [ ] T5.1  - [ ] T5.2
+- [ ] T5.1  - [ ] T5.2  (next)
 - [ ] T6.1  - [ ] T6.2  - [ ] T6.3
 - [ ] T7.1  - [ ] T7.2
 - [x] T8.1  - [x] T8.2  - [x] T8.3 (1005b75)
@@ -72,3 +72,4 @@ Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both
 - T4 round-1 minors (logged): DESCRIPTION strings don't mention the new result keys (capped, unlisted_unsupported, margin_errors, capped_at_k).
 - A test in tests/test_kit_algebra.py (test_exact_mod_of_a_huge_power_finishes_without_building_it) failed once during the T4 fixer's full run, while the T3 hardening fixer was mid-edit. Re-check when the hardening commit lands.
 - A safety classifier cut short a hostile-payload review of the parser. Don't re-run payload-hunting reviews; use defensive code review and ordinary tests.
+- T4 re-review minors (logged): `capped_at_k` is set even when the k-th counterexample was the last point; two child-process test assertions still accept "before any progress".
