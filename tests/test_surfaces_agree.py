@@ -10,9 +10,6 @@ INTERNAL = {"run", "algo_lint", "algo_run", "algo_search", "algo_show", "link_ad
 
 # Spec buttons that are not built yet. Remove a name here when its button lands.
 PENDING = {
-    "identify",
-    "extremum",
-    "numeric",
     "construct",
     "diff_test",
     "growth",
