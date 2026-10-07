@@ -68,6 +68,19 @@ def _normal_form(x: Any) -> Any:
     return x
 
 
+def _symbolic(x: Any) -> Any:
+    """x as something sympy can subtract. A string is never handed to sympify (which evaluates text):
+    it is read as a number, then through the whitelisted parser; text neither accepts raises ValueError."""
+    if not isinstance(x, str):
+        return sp.sympify(x)
+    try:
+        return sp.Rational(fractions.Fraction(x.strip()))
+    except (ValueError, ZeroDivisionError):
+        pass
+    from .parsing import parse_expr
+    return parse_expr(x)
+
+
 def _equal(a: Any, b: Any) -> bool:
     try:
         if bool(a == b):  # plain equality first: sympify turns two equal sets into a Complement, never 0
@@ -80,7 +93,7 @@ def _equal(a: Any, b: Any) -> bool:
     except Exception:  # noqa: BLE001  (an unhashable element in a set, say)
         pass
     try:
-        sa, sb = sp.sympify(a), sp.sympify(b)
+        sa, sb = _symbolic(a), _symbolic(b)
         return bool(sp.simplify(sa - sb) == 0)
     except Exception:
         pass

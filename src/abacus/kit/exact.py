@@ -6,6 +6,7 @@ floating point: 2**100 % 1000 is computed with the 31-digit integer, never a flo
 from __future__ import annotations
 
 import ast
+from fractions import Fraction
 
 import sympy as sp
 
@@ -97,6 +98,18 @@ def _fast_mod(src: str, m: int) -> int | None:
         return None
 
 
+def _is_plain_value(v) -> bool:
+    """A sympy object, an int, a Fraction, None (a function that found no result), or a list, tuple,
+    set or dict of these. Anything else (a class, a bound method, a string) is never reported."""
+    if v is None or isinstance(v, (sp.Basic, int, Fraction)):
+        return True
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return all(_is_plain_value(i) for i in v)
+    if isinstance(v, dict):
+        return all(_is_plain_value(k) and _is_plain_value(i) for k, i in v.items())
+    return False
+
+
 def _decimal(v) -> str | None:
     """30 significant digits of a numeric value; None for a list, a boolean, a dict ..."""
     if isinstance(v, bool) or not isinstance(v, sp.Expr) or not v.is_number:
@@ -136,6 +149,10 @@ def exact(inp: dict, ctx) -> Evidence:
                 "exact", f"exact evaluates closed-form expressions, but {', '.join(syms + funcs)} is not "
                          f"defined (a misspelt function name is read as an unknown symbol); the names it "
                          f"knows: {_NAMES_HELP}")
+
+    if not _is_plain_value(v):
+        return alg.bad_input("exact", "the expression did not evaluate to a number, expression or "
+                                      "list/dict of them")
 
     notes = alg.input_notes([src])
     if mod is not None and fast is None:

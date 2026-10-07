@@ -132,3 +132,37 @@ def test_no_verdict_keys():
     d = e.to_dict()
     assert not (set(_keys(d)) & BANNED)
     assert not (set(Evidence.__dataclass_fields__) & BANNED)
+
+
+# ---------------------------------------------------------------- T3 hardening: no sympify of strings
+
+def test_compare_numeric_strings():
+    assert make_compare("1/2", 0.5)["equal"] is True
+    assert make_compare("0.25", fractions.Fraction(1, 4))["equal"] is True
+    assert make_compare("1/2", 0.75)["equal"] is False
+
+
+def test_compare_expression_string_goes_through_the_whitelist():
+    assert make_compare("x + x", "2*x")["equal"] is True
+    assert make_compare("x + x", "3*x")["equal"] is False
+    assert make_compare("(x+1)**2", "x**2 + 2*x + 1")["equal"] is True
+
+
+def test_compare_never_sympifies_a_string(monkeypatch):
+    real = sp.sympify
+
+    def guard(a, *args, **kw):
+        assert not isinstance(a, str), f"sympify called on a string: {a!r}"
+        return real(a, *args, **kw)
+
+    monkeypatch.setattr(sp, "sympify", guard)
+    assert make_compare("1/2", 0.5)["equal"] is True
+    assert make_compare("x + x", "2*x")["equal"] is True
+    assert make_compare("abc def", "xyz")["equal"] is False
+
+
+@pytest.mark.parametrize("text", ["'a'", '"a" + "b"', "x.func", "__import__('os')", "a b c", "1 +", "lambda: 1"])
+def test_compare_rejected_strings_compare_as_plain_text(text):
+    assert make_compare(text, text)["equal"] is True
+    assert make_compare(text, "something else")["equal"] is False
+    assert make_compare(text, 0)["equal"] is False

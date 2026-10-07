@@ -210,6 +210,9 @@ def identity(inp: dict, ctx) -> Evidence:
         for n in declared:
             if not re.match(alg.IDENT, n):
                 raise ValueError(f"{n!r} is not a variable name")
+        for n in inp.get("vars") or []:
+            if not isinstance(n, str) or not re.match(alg.IDENT, n):
+                raise ValueError(f"{n!r} in vars is not a variable name (a plain identifier such as x or x_1)")
         default = alg.parse_domain("real")
         names = list(dict.fromkeys([*(inp.get("vars") or []), *declared]))
         sources = [inp["lhs"], inp["rhs"]]

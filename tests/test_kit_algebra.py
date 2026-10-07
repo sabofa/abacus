@@ -234,8 +234,13 @@ def test_exact_a_misspelt_key_is_rejected_not_ignored():
     assert "bad_input" in codes(ev) and ev.result is None
 
 
-def test_exact_an_inexact_result_is_flagged():
-    ev = run("exact", expr="sqrt(2).n(20)")
+def test_exact_an_inexact_result_is_flagged(monkeypatch):
+    # a float can no longer be reached through `.evalf()`/`.n()` (attribute access is rejected), so a
+    # namespace function that returns one stands in for it
+    ns = alg.exact_namespace()
+    ns["flt"] = lambda: alg.sp.Float("2.5")
+    monkeypatch.setattr(alg, "exact_namespace", lambda: ns)
+    ev = run("exact", expr="flt()")
     assert "inexact" in codes(ev)
 
 
@@ -807,12 +812,12 @@ def test_cas_solve_with_a_double_equals_is_bad_input(expr):
 
 
 def test_cas_a_keyword_argument_is_not_an_equation():
-    ev = run("cas", op="simplify", expr="Poly(x**2 + 6, x, modulus=5).as_expr()", vars=["x"])
+    ev = run("cas", op="simplify", expr="expand(x**2 + 6, modulus=5)", vars=["x"])
     assert "bad_input" not in codes(ev), ev.flags
     assert ev.result["value"] == "x**2 + 1"
-    ev = run("cas", op="solve", expr="Poly(x**2 - 1, x, modulus=5).as_expr() = 0", vars=["x"])
+    ev = run("cas", op="solve", expr="expand(x**2 - 1, modulus=5) = 0", vars=["x"])
     assert "bad_input" not in codes(ev), ev.flags
-    assert sorted(ev.result["value"].strip("[]").split(", ")) == ["-1", "1"]
+    assert sorted(ev.result["value"].strip("[]").split(", ")) == ["-2*I", "2*I"]
 
 
 def test_cas_diff_says_it_ignored_point():
@@ -828,3 +833,70 @@ def test_cas_limit_at_infinity_says_it_ignored_direction():
     assert "direction" in notes(ev) and "ignored" in notes(ev)
     ev = run("cas", op="limit", expr="1/x", var="x", point="0", direction="+")
     assert "ignored" not in notes(ev)
+
+
+# ---------------------------------------------------------------- T3 hardening: no attribute access
+
+ATTR_EXPRS = ["x.func", "Symbol.mro()", "x.name", "(1).real", "x . func", "1..real", "x1.args"]
+
+
+def _run_attr(button, expr):
+    if button == "exact":
+        return run("exact", expr=expr)
+    if button == "cas":
+        return run("cas", op="simplify", expr=expr, vars=["x"])
+    return run("identity", lhs=expr, rhs="x", vars=["x"])
+
+
+@pytest.mark.parametrize("button", ["exact", "cas", "identity"])
+@pytest.mark.parametrize("expr", ATTR_EXPRS)
+def test_attribute_access_is_bad_input(button, expr):
+    ev = _run_attr(button, expr)
+    assert ev.complete is False and ev.result is None
+    assert [f["code"] for f in ev.flags] == ["bad_input"]
+    assert "attribute access" in ev.flags[0]["message"]
+
+
+@pytest.mark.parametrize("lit", ["0.5", ".5", "1.", "1e3", "1.5e3", "2.5E-2"])
+def test_numeric_literals_with_a_dot_stay_legal(lit):
+    assert not any(f["code"] == "bad_input" for f in run("exact", expr=lit).flags)
+    assert not any(f["code"] == "bad_input" for f in run("cas", op="simplify", expr=lit + " + x", vars=["x"]).flags)
+    assert not any(f["code"] == "bad_input" for f in run("identity", lhs=lit + " + x", rhs="x + " + lit,
+                                                         vars=["x"], seed=1).flags)
+
+
+def test_exact_value_is_unchanged_for_decimal_literals():
+    assert run("exact", expr="0.5 + .5 + 1.").result["value"] == "2"
+
+
+def test_check_text_names_attribute_access():
+    with pytest.raises(ValueError, match="attribute access is not allowed"):
+        alg.parsing.check_text("x.func")
+    alg.parsing.check_text("0.5 + .5 + 1. + 1e3 + 1.5e3")
+
+
+def test_exact_never_returns_a_non_sympy_object(monkeypatch):
+    # the type check is the second line of defence: a namespace function that hands back a stray object
+    exact_mod = importlib.import_module("abacus.kit.exact")
+    ns = alg.exact_namespace()
+    ns["stray"] = lambda: object()
+    monkeypatch.setattr(alg, "exact_namespace", lambda: ns)
+    ev = run("exact", expr="stray()")
+    assert ev.complete is False and ev.result is None
+    assert [f["code"] for f in ev.flags] == ["bad_input"]
+    assert "object at 0x" not in json.dumps(ev.to_dict(full=True))
+    assert exact_mod  # imported
+
+
+# ---------------------------------------------------------------- T3 hardening: identity vars
+
+@pytest.mark.parametrize("bad", ["x.func", "x y", "1x", "", "x'", "a-b"])
+def test_identity_rejects_a_vars_entry_that_is_not_an_identifier(bad):
+    ev = run("identity", lhs="x", rhs="x", vars=["x", bad])
+    assert ev.complete is False and ev.result is None
+    assert [f["code"] for f in ev.flags] == ["bad_input"]
+
+
+def test_identity_accepts_plain_identifier_vars():
+    ev = run("identity", lhs="x_1 + y2", rhs="y2 + x_1", vars=["x_1", "y2"], seed=1)
+    assert not any(f["code"] == "bad_input" for f in ev.flags)

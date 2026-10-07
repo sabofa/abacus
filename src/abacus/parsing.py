@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import collections
 import functools
+import io
 import itertools
 import math
+import tokenize
 from fractions import Fraction
 from typing import Callable, Iterable, Literal, Sequence
 
@@ -34,6 +36,21 @@ _BAD_SUBSTRINGS = ("__", "import", "lambda", "exec", "eval", "open")
 QUOTE_CHARS = ("'", '"')
 
 
+def _has_attribute_access(s: str) -> bool:
+    """True if `s` has a `.` that is not part of a numeric literal (0.5, .5, 1., 1.5e3).
+
+    Python's own tokenizer reads the numbers first, so only an attribute dot is left as an operator.
+    Tokens read before a tokenizer error still count: text that fails to tokenize fails to parse too.
+    """
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(s).readline):
+            if tok.type == tokenize.OP and tok.string in (".", "..."):
+                return True
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        pass
+    return False
+
+
 def check_text(s: str) -> None:
     """Raise ValueError for text that must never reach the evaluator."""
     low = s.lower()
@@ -43,6 +60,9 @@ def check_text(s: str) -> None:
     if any(q in s for q in QUOTE_CHARS):
         raise ValueError("expression rejected: contains a quote character; string literals are not "
                          "allowed (write names bare: x, not 'x')")
+    if _has_attribute_access(s):
+        raise ValueError("expression rejected: attribute access is not allowed in expressions (a '.' is "
+                         "only read inside a number such as 0.5; write x, not x.name)")
 
 
 def _whitelist() -> dict:
