@@ -424,7 +424,19 @@ def _mint(rest: list[str]) -> int:
     return 0 if ev.result is not None else 2  # nothing was written
 
 
+def _utf8_streams() -> None:
+    """Print UTF-8 whatever the console's code page is. Output is JSON written with ensure_ascii=False
+    to stay readable (titles with Σ, ≤, →), and on Windows a pipe defaults to cp1252, which cannot
+    encode those. A stream that cannot be reconfigured (a test's StringIO) is left as it is."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv=None) -> int:
+    _utf8_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
         print(_top_help())

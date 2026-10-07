@@ -258,3 +258,122 @@ def test_usage_follows_the_configured_library(tmp_path, monkeypatch):
     assert (tmp_path / "x" / "usage.jsonl").exists()
     monkeypatch.setenv("ABACUS_LIBRARY", str(tmp_path / "y"))
     assert usage.counts() == {}
+
+
+# ---- a relative ABACUS_LIBRARY, and the lock -------------------------------------
+
+def test_a_relative_library_gives_absolute_paths(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ABACUS_LIBRARY", "rel-lib")
+    assert links.links_path().is_absolute() and usage.usage_path().is_absolute()
+    assert links.links_path().resolve() == (tmp_path / "rel-lib" / "links.jsonl").resolve()
+    assert usage.usage_path().resolve() == (tmp_path / "rel-lib" / "usage.jsonl").resolve()
+    links.add("a.one", T1, "minted")
+    usage.record("a.one", "compute", 0.1, True)
+    assert (tmp_path / "rel-lib" / "links.jsonl").is_file() and (tmp_path / "rel-lib" / "usage.jsonl").is_file()
+
+
+def test_concurrent_adds_and_rms_lose_nothing(lib):
+    import threading
+
+    n_adders, per_adder = 3, 40
+    errors = []
+
+    def adder(k):
+        try:
+            for i in range(per_adder):
+                links.add(f"keep.t{k}", f"osmosis:q:{k}-{i}", "minted")
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    def churner(k):
+        try:
+            for i in range(per_adder):
+                links.add(f"churn.t{k}", f"osmosis:q:tmp-{i}", "minted")
+                assert links.rm(f"churn.t{k}", f"osmosis:q:tmp-{i}") == 1
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=adder, args=(k,)) for k in range(n_adders)]
+    threads += [threading.Thread(target=churner, args=(k,)) for k in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert not errors, errors
+    kept = [r for r in links.list_links() if r["algo"].startswith("keep.")]
+    assert len(kept) == n_adders * per_adder  # no add was swallowed by a rm that read an older file
+    assert not [r for r in links.list_links() if r["algo"].startswith("churn.")]
+    assert sorted(x.name for x in lib.iterdir()) == ["links.jsonl"]  # no lock or temp file left behind
+
+
+def test_the_lock_is_released_after_a_failure(lib, monkeypatch):
+    links.add("a.one", T1, "minted")
+
+    def boom(src, dst):
+        raise OSError("disk on fire")
+
+    with monkeypatch.context() as m:  # not monkeypatch.undo(): that would also undo the library's setenv
+        m.setattr(os, "replace", boom)
+        with pytest.raises(OSError):
+            links.rm("a.one", T1)
+    assert not (lib / "links.jsonl.lock").exists()
+    links.add("a.one", T2, "minted")  # not blocked by a leftover lock
+
+
+def test_a_held_lock_times_out_with_an_error_not_a_hang(lib, monkeypatch):
+    from abacus.library import _jsonl
+
+    links.add("a.one", T1, "minted")
+    (lib / "links.jsonl.lock").write_text("held")
+    monkeypatch.setattr(_jsonl, "LOCK_TIMEOUT_S", 0.3)
+    with pytest.raises(TimeoutError):
+        links.add("a.one", T2, "minted")
+    with pytest.raises(TimeoutError):
+        links.rm("a.one", T1)
+    assert [r["target"] for r in links.list_links()] == [T1]
+
+
+def test_a_stale_lock_from_a_dead_process_is_broken(lib, monkeypatch):
+    from abacus.library import _jsonl
+
+    links.add("a.one", T1, "minted")
+    lock = lib / "links.jsonl.lock"
+    lock.write_text("dead")
+    old = lock.stat().st_mtime - 3600
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(_jsonl, "LOCK_TIMEOUT_S", 0.3)
+    links.add("a.one", T2, "minted")
+    assert [r["target"] for r in links.list_links()] == [T1, T2] and not lock.exists()
+
+
+def test_rm_retries_a_replace_that_windows_refuses(lib, monkeypatch):
+    links.add("a.one", T1, "minted")
+    links.add("a.one", T2, "minted")
+    real, calls = os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("the file is open elsewhere")
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    assert links.rm("a.one", T1) == 1
+    assert len(calls) == 3 and [r["target"] for r in links.list_links()] == [T2]
+    assert sorted(x.name for x in lib.iterdir()) == ["links.jsonl"]
+
+
+def test_rm_gives_up_on_a_replace_that_never_works(lib, monkeypatch):
+    links.add("a.one", T1, "minted")
+    before = (lib / "links.jsonl").read_bytes()
+
+    def never(src, dst):
+        raise PermissionError("locked")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "replace", never)
+        with pytest.raises(PermissionError):
+            links.rm("a.one", T1)
+    assert (lib / "links.jsonl").read_bytes() == before
+    assert sorted(x.name for x in lib.iterdir()) == ["links.jsonl"]

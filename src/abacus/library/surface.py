@@ -14,6 +14,7 @@ from ..evidence import Evidence
 from . import index, links, store, usage
 
 _STR = {"type": "string"}
+_SHOWN_PROBLEMS = 3  # how many skipped files algo_search names in its flag
 
 
 def show_record(algo_id: str) -> dict:
@@ -61,8 +62,21 @@ def algo_search(inp: dict, ctx) -> Evidence:
         return _fail("algo_search", "index_error", f"{type(e).__name__}: {e}",
                      "the search index could not be read; `abacus index rebuild` makes a new one")
     lib = store.library_dir()
+    try:
+        info = index.info()
+    except sqlite3.Error as e:
+        return _fail("algo_search", "index_error", f"{type(e).__name__}: {e}",
+                     "the search index could not be read; `abacus index rebuild` makes a new one")
+    n = info["indexed"]
     ev = Evidence(button="algo_search", result=found, method="search",
-                  scope=f"searched {len(store.list_files())} algorithms in {lib}; {len(found)} matched")
+                  scope=f"searched {n} indexed algorithm{'' if n == 1 else 's'} in {lib}; {len(found)} matched")
+    if info["problems"]:
+        shown = info["problems"][:_SHOWN_PROBLEMS]
+        more = len(info["problems"]) - len(shown)
+        ev.flag("skipped_files", f"{len(info['problems'])} file(s) in the library could not be indexed, so "
+                                 "the search does not cover them: " + "; ".join(shown)
+                                 + (f"; and {more} more" if more else "")
+                                 + ". `abacus index rebuild` lists them all.")
     if len(found) >= limit:
         ev.notes.append(f"{len(found)} results is the limit; raise limit if there may be more")
     return ev

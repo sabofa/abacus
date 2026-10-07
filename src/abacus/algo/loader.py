@@ -1,6 +1,7 @@
 """Load an algorithm file, validate its META, and hash it (spec 05 s2, s6)."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 import sys
@@ -191,6 +192,8 @@ def load_algo(path) -> LoadedAlgo:
     The file is compiled from its source text and run in a fresh module, so no bytecode cache is read
     (a same-size, same-second edit cannot load the old code) and none is written next to the file.
     An import-time `sys.exit()` is reported as an import error rather than ending the caller.
+    Anything the file prints while it is imported goes to stderr: stdout belongs to the caller's output
+    (the CLI's JSON, the MCP stream), and a file must not be able to corrupt it.
     """
     p = Path(path).resolve()
     if not p.is_file():
@@ -206,7 +209,8 @@ def load_algo(path) -> LoadedAlgo:
     sys.modules[modname] = module  # the file's own imports (dataclasses, pickle) look its module up by name
     try:
         code = compile(source, str(p), "exec", dont_inherit=True)
-        exec(code, module.__dict__)  # noqa: S102
+        with contextlib.redirect_stdout(sys.stderr):
+            exec(code, module.__dict__)  # noqa: S102
     except (Exception, SystemExit) as e:  # noqa: BLE001
         sys.modules.pop(modname, None)
         raise AlgoImportError(f"{type(e).__name__}: {e}") from e

@@ -398,3 +398,72 @@ def test_a_missing_library_searches_empty_and_is_not_created(lib):
 def test_rebuild_of_an_empty_library(lib):
     assert index.rebuild() == []
     assert index.search("") == []
+
+
+# ---- a relative ABACUS_LIBRARY, quiet imports, the kit version ----------------
+
+def test_a_relative_library_indexes_and_searches(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ABACUS_LIBRARY", "rel-lib")
+    assert store.library_dir().is_absolute()
+    assert store.library_dir().resolve() == (tmp_path / "rel-lib").resolve()
+    store.write(FAM_ID, FAM_SRC)
+    store.write(ONE_ID, ONE_SRC)
+    assert index.rebuild() == []  # not "META id 'nt.power-mod' does not match the id 'rel-lib.nt.power-mod'"
+    assert ids(index.search("")) == sorted([FAM_ID, ONE_ID])
+    assert store.path_to_id("nt/power-mod.py") == FAM_ID  # a relative path is taken from the library
+    assert store.path_to_id(store.id_to_path(FAM_ID)) == FAM_ID
+    assert store.list_ids() == sorted([FAM_ID, ONE_ID])
+
+
+PRINTING_SRC = "print('hello from import')\n" + algo_src("zz.chatty", title="Chatty")
+
+
+def test_import_time_prints_do_not_reach_stdout(lib, capsys):
+    store.write("zz.chatty", PRINTING_SRC)
+    store.write(ONE_ID, ONE_SRC)
+    capsys.readouterr()
+    assert index.rebuild() == []
+    assert ids(index.search("chatty")) == ["zz.chatty"]
+    store.read("zz.chatty")
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "hello from import" in err  # kept, but on stderr
+
+
+def _stamp_of(path):
+    con = sqlite3.connect(path)
+    try:
+        return dict(con.execute("SELECT key, value FROM meta"))
+    finally:
+        con.close()
+
+
+def test_a_new_kit_version_rebuilds_the_index(two, monkeypatch):
+    import abacus
+    index.rebuild()
+    old = _stamp_of(two / ".index.sqlite")
+    assert abacus.__version__ in "".join(old.values())
+    before = (two / ".index.sqlite").stat().st_mtime_ns
+    assert ids(index.search("fixed")) == [ONE_ID]
+    assert (two / ".index.sqlite").stat().st_mtime_ns == before  # same version: still fresh
+    monkeypatch.setattr(abacus, "__version__", "9.9.9")
+    assert ids(index.search("fixed")) == [ONE_ID]
+    assert "9.9.9" in "".join(_stamp_of(two / ".index.sqlite").values())  # rebuilt under the new version
+
+
+# ---- the problems of the last build ---------------------------------------------
+
+def test_info_counts_indexed_rows_and_keeps_the_problems(two):
+    (two / "bad").mkdir()
+    (two / "bad" / "syntax.py").write_text("def (:\n")
+    info = index.info()
+    assert info["indexed"] == 2 and len(info["problems"]) == 1 and "syntax.py" in info["problems"][0]
+    (two / "bad" / "syntax.py").unlink()
+    info = index.info()  # the broken file is gone: the problems go with it
+    assert info == {"indexed": 2, "problems": []}
+
+
+def test_info_of_a_missing_library(lib):
+    assert index.info() == {"indexed": 0, "problems": []}
+    assert not lib.exists()

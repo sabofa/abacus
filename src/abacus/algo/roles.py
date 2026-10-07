@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import secrets
-import time
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -145,9 +144,10 @@ def algo_run(inp: dict, ctx) -> Evidence:
                     scope=f"the naive-search size hand_space(params) returned for {algo.meta['id']} [{algo.hash}]")
 
 
-def _record_usage(algo_path, role: str, ev: Evidence, elapsed_s: float) -> None:
+def record_usage(algo_path, role, ev: Evidence, elapsed_s: float) -> None:
     """One usage.jsonl line for a run of an algorithm that lives in the library (kit/06 s4). Anything
     else is not recorded, nor is an input the budget rejected before it ran (it sets no `budget`).
+    `budget.call` calls this once for every `algo_run`, whichever surface started it.
     This can never fail a run: every error is swallowed."""
     try:
         from ..library import store, usage
@@ -178,7 +178,5 @@ def run_role(algo_path, role: str, *, args: dict | None = None, seed: int | None
     inp: dict = {"path": str(algo_path), "role": role, "knobs": dict(knobs or {}), "args": args}
     if seed is not None:
         inp["seed"] = seed
-    t0 = time.monotonic()
-    ev = budget.call(BUTTON, inp, time_s=time_s, in_process=in_process, full=True)
-    _record_usage(algo_path, role, ev, time.monotonic() - t0)
-    return ev
+    # budget.call records the run in usage.jsonl, as it does for the CLI and MCP surfaces.
+    return budget.call(BUTTON, inp, time_s=time_s, in_process=in_process, full=True)

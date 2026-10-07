@@ -206,7 +206,7 @@ def test_algo_search_button(lib):
     ev = call("algo_search", {"query": "modular"})
     assert ev.complete and ev.method == "search" and ev.button == "algo_search"
     assert ids(ev.result) == [NT]
-    assert "searched 2 algorithms" in ev.scope and str(lib) in ev.scope
+    assert "searched 2 indexed algorithms" in ev.scope and str(lib) in ev.scope
     ev = call("algo_search", {"sort": "most_used", "limit": 1, "unlinked": True, "role": "compute",
                               "tag": "number-theory", "technique": "fast-exponentiation",
                               "answer_format": "integer"})
@@ -350,3 +350,99 @@ def test_an_unwritable_usage_file_never_fails_the_run(lib):
     (lib / "usage.jsonl").mkdir()  # appending to a directory raises
     ev = run_role(lib / "nt" / "power-mod.py", "compute", args=PARAMS, in_process=True)
     assert ev.complete and ev.result == pow(3, 4, 7)
+
+
+# ---- usage is recorded where every path goes through: budget.call ---------------
+
+def algo_run_input(role="compute", **extra):
+    return {"path": str(Path(os.environ["ABACUS_LIBRARY"]) / "nt" / "power-mod.py"), "role": role,
+            "args": PARAMS, **extra}
+
+
+def test_mcp_algo_run_appends_exactly_one_usage_row(lib):
+    text, is_error = mcp_server.call_tool("algo_run", algo_run_input())
+    ev = json.loads(text)
+    assert not is_error and ev["complete"] is True and ev["result"] == pow(3, 4, 7), ev
+    (row,) = rows(lib)
+    assert row["algo"] == NT and row["role"] == "compute" and row["complete"] is True
+    assert usage.counts() == {NT: 1}
+
+
+def test_the_cli_algo_run_button_appends_exactly_one_usage_row(lib, capsys):
+    out = ok(capsys, "algo_run", json.dumps(algo_run_input()))
+    assert out["complete"] is True and out["result"] == pow(3, 4, 7)
+    (row,) = rows(lib)
+    assert row["algo"] == NT and row["role"] == "compute"
+
+
+def test_run_role_appends_exactly_one_row_in_a_child_process_too(lib):
+    ev = run_role(lib / "nt" / "power-mod.py", "compute", args=PARAMS)
+    assert ev.complete and ev.result == pow(3, 4, 7)
+    assert len(rows(lib)) == 1 and usage.counts() == {NT: 1}
+
+
+def test_budget_call_in_process_records_one_row_and_run_role_does_not_add_another(lib):
+    ev = budget.call("algo_run", algo_run_input(), in_process=True)
+    assert ev.complete and len(rows(lib)) == 1
+    run_role(lib / "nt" / "power-mod.py", "compute", args=PARAMS, in_process=True)
+    assert len(rows(lib)) == 2
+
+
+def test_other_buttons_record_nothing(lib):
+    budget.call("algo_search", {"query": "modular"}, in_process=True)
+    budget.call("algo_show", {"id": NT}, in_process=True)
+    assert rows(lib) == []
+
+
+def test_an_algo_run_rejected_by_the_budget_records_nothing(lib):
+    ev = budget.call("algo_run", algo_run_input(seed=-1), in_process=True)
+    assert ev.flags[0]["code"] == "bad_input"
+    ev = budget.call("algo_run", {"path": str(lib / "nt" / "power-mod.py"), "role": "nonsense"}, in_process=True)
+    assert ev.flags[0]["code"] == "bad_input"
+    assert rows(lib) == []
+
+
+# ---- algo_search says what it did not search ------------------------------------
+
+def test_algo_search_counts_indexed_algorithms_and_flags_skipped_files(tmp_path, monkeypatch):
+    d = tmp_path / "lib2"
+    monkeypatch.setenv("ABACUS_LIBRARY", str(d))
+    store.write(NT, (FIX / "nt_power_mod.py").read_text(encoding="utf-8"))
+    (d / "bad").mkdir()
+    (d / "bad" / "broken.py").write_text("def (:\n")
+    ev = call("algo_search", {})
+    assert ids(ev.result) == [NT] and ev.complete
+    assert "searched 1 indexed algorithm" in ev.scope and str(d) in ev.scope
+    (flag,) = [f for f in ev.flags if f["code"] == "skipped_files"]
+    assert "broken.py" in flag["message"] and "1" in flag["message"]
+    # a clean library carries no such flag
+    (d / "bad" / "broken.py").unlink()
+    ev = call("algo_search", {})
+    assert not [f for f in ev.flags if f["code"] == "skipped_files"] and "searched 1 indexed algorithm" in ev.scope
+
+
+def test_the_skipped_files_message_names_only_the_first_few(tmp_path, monkeypatch):
+    d = tmp_path / "lib3"
+    monkeypatch.setenv("ABACUS_LIBRARY", str(d))
+    store.write(NT, (FIX / "nt_power_mod.py").read_text(encoding="utf-8"))
+    (d / "bad").mkdir()
+    for n in range(8):
+        (d / "bad" / f"broken{n}.py").write_text("def (:\n")
+    (flag,) = [f for f in call("algo_search", {}).flags if f["code"] == "skipped_files"]
+    assert "8" in flag["message"] and "broken0.py" in flag["message"] and "broken7.py" not in flag["message"]
+
+
+# ---- an algorithm that prints at import cannot corrupt the CLI's JSON -------------
+
+CHATTY = (FIX / "nt_power_mod.py").read_text(encoding="utf-8").replace(
+    "\nMETA", "\nprint('chatty import')\nMETA", 1)
+
+
+def test_import_time_prints_do_not_corrupt_cli_json(lib, capsys):
+    assert CHATTY != (FIX / "nt_power_mod.py").read_text(encoding="utf-8")
+    store.write(NT, CHATTY, overwrite=True)
+    assert ids(ok(capsys, "algo", "search")) == [MISC, NT]
+    assert ok(capsys, "algo", "show", NT)["meta"]["id"] == NT
+    ev = ok(capsys, "algo", "show", str(lib / "nt" / "power-mod.py"))
+    assert ev["meta"]["id"] == NT
+    assert call("algo_show", {"id": NT}).complete

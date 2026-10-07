@@ -1,8 +1,10 @@
 """The search index: a SQLite FTS5 cache of the library's META, at `<library>/.index.sqlite` (kit/06 s2).
 
 Files are the truth; this is only a cache. `search` rebuilds it when it is missing, corrupt, from
-another schema version, or stale (a file was added, removed, or changed). Link and usage counts are
-not stored here: they are read from links.jsonl and usage.jsonl at query time.
+another schema version or another kit version (what it indexes can change with the kit), or stale (a
+file was added, removed, or changed). Link and usage counts are not stored here: they are read from
+links.jsonl and usage.jsonl at query time. The problems of the last build (files it could not index)
+are kept in the meta table, for `info`.
 """
 from __future__ import annotations
 
@@ -10,6 +12,8 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+
+import abacus
 
 from ..algo.loader import AlgoImportError, MetaError, load_algo
 from . import links, store, usage
@@ -80,7 +84,8 @@ def _load_all() -> tuple[list[dict], dict[str, tuple[int, int]], list[str]]:
     return rows, snap, problems
 
 
-def _write(con: sqlite3.Connection, rows: list[dict], snap: dict[str, tuple[int, int]]) -> None:
+def _write(con: sqlite3.Connection, rows: list[dict], snap: dict[str, tuple[int, int]],
+           problems: list[str]) -> None:
     con.execute("BEGIN IMMEDIATE")
     try:
         for table in ("fts", "facets", "algos", "files", "meta"):
@@ -95,7 +100,8 @@ def _write(con: sqlite3.Connection, rows: list[dict], snap: dict[str, tuple[int,
         con.execute("CREATE INDEX facets_lookup ON facets (kind, value)")
         con.execute("CREATE VIRTUAL TABLE fts USING fts5(id, title, summary, tags, techniques,"
                     " tokenize = 'porter unicode61 remove_diacritics 2')")
-        con.execute("INSERT INTO meta VALUES ('schema', ?)", (SCHEMA,))
+        con.executemany("INSERT INTO meta VALUES (?, ?)", [("schema", SCHEMA), ("kit", abacus.__version__),
+                                                           ("problems", json.dumps(problems))])
         con.executemany("INSERT INTO files VALUES (?, ?, ?)", [(rel, *v) for rel, v in snap.items()])
         for n, r in enumerate(rows, 1):
             con.execute("INSERT INTO algos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -121,7 +127,7 @@ def _rebuild() -> list[str]:
     for attempt in (1, 2):
         con = _connect(path)
         try:
-            _write(con, rows, snap)
+            _write(con, rows, snap, problems)
             return problems
         except sqlite3.OperationalError:  # busy or read-only: not something to paper over
             raise
@@ -144,8 +150,8 @@ def rebuild() -> list[str]:
 
 def _is_fresh(con: sqlite3.Connection, snap: dict[str, tuple[int, int]]) -> bool:
     try:
-        row = con.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-        if row is None or row[0] != SCHEMA:
+        stamp = dict(con.execute("SELECT key, value FROM meta WHERE key IN ('schema', 'kit')"))
+        if stamp.get("schema") != SCHEMA or stamp.get("kit") != abacus.__version__:
             return False
         stored = {rel: (m, s) for rel, m, s in con.execute("SELECT relpath, mtime_ns, size FROM files")}
     except sqlite3.OperationalError as e:
@@ -176,6 +182,20 @@ def _open_fresh() -> sqlite3.Connection:
         con.close()
     _rebuild()
     return _connect(path)
+
+
+def info() -> dict:
+    """What the search index covers: `indexed`, how many algorithms it holds, and `problems`, the files
+    of the last build that were left out of it (as `rebuild` returned them). Rebuilds first if stale."""
+    if not store.library_dir().is_dir():
+        return {"indexed": 0, "problems": []}
+    con = _open_fresh()
+    try:
+        indexed = con.execute("SELECT count(*) FROM algos").fetchone()[0]
+        row = con.execute("SELECT value FROM meta WHERE key = 'problems'").fetchone()
+    finally:
+        con.close()
+    return {"indexed": indexed, "problems": json.loads(row[0]) if row else []}
 
 
 def search(query: str = "", *, role=None, tag=None, technique=None, answer_format=None,

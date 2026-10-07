@@ -12,8 +12,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from ..config import get_config
-from ._jsonl import append_row, now_iso, parse_line, read_rows
+from . import store
+from ._jsonl import append_row, file_lock, now_iso, parse_line, read_rows, replace_file
 
 KINDS = ("minted", "checks", "family")
 _TARGET_RE = re.compile(r"[a-z0-9_-]+:[a-z0-9_-]+:.+")
@@ -21,7 +21,7 @@ _ALGO_RE = re.compile(r"\S+")
 
 
 def links_path() -> Path:
-    return get_config().library / "links.jsonl"
+    return store.library_dir() / "links.jsonl"
 
 
 def _check(algo, target, kind) -> None:
@@ -40,11 +40,14 @@ def target_matches(target: str, spec: str) -> bool:
 
 def add(algo: str, target: str, kind: str, *, algo_hash: str | None = None,
         seed: int | None = None, batch: str | None = None) -> dict:
-    """Append one link and return it. Raises ValueError, writing nothing, on a bad algo, target or kind."""
+    """Append one link and return it. Raises ValueError, writing nothing, on a bad algo, target or kind.
+    Holds the file lock, so a `rm` rewriting the file at the same moment cannot lose the new line."""
     _check(algo, target, kind)
     rec = {"algo": algo, "target": target, "kind": kind, "algo_hash": algo_hash,
            "seed": seed, "batch": batch, "at": now_iso()}
-    append_row(links_path(), rec)
+    path = links_path()
+    with file_lock(path):
+        append_row(path, rec)
     return rec
 
 
@@ -58,8 +61,16 @@ def _rows() -> list[dict]:
 
 def rm(algo: str, target: str) -> int:
     """Delete every line linking `algo` to `target`; return how many. Other lines are kept verbatim,
-    including any this module cannot parse. The file is replaced atomically, only if a line went."""
+    including any this module cannot parse. The file is replaced atomically, only if a line went.
+    Holds the file lock from the read to the replace, so a concurrent `add` is never overwritten."""
     path = links_path()
+    if not path.exists():
+        return 0
+    with file_lock(path):
+        return _rm_locked(path, algo, target)
+
+
+def _rm_locked(path: Path, algo: str, target: str) -> int:
     try:
         text = path.read_bytes().decode("utf-8", errors="surrogateescape")
     except FileNotFoundError:
@@ -87,7 +98,7 @@ def rm(algo: str, target: str) -> int:
             shutil.copymode(path, tmp)
         except OSError:
             pass
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

@@ -157,3 +157,52 @@ def test_buttons_lists_algo_run_and_lint_but_not_algo_role(capsys):
     assert main(["buttons"]) == 0
     text = capsys.readouterr().out
     assert "algo_run\t" in text and "algo_lint\t" in text and "algo_role" not in text
+
+
+# ---- output that is not cp1252, and an algorithm that prints at import ----------
+
+def _env(library, **extra):
+    import os
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    env["ABACUS_LIBRARY"] = str(library)
+    env.update(extra)
+    return env
+
+
+def _algo_source(algo_id, title, prelude=""):
+    meta = {"id": algo_id, "title": title, "summary": "Sums two numbers.", "roles": ["compute"],
+            "answer": {"format": "integer"}}
+    return f"{prelude}META = {meta!r}\n\n\ndef compute(params):\n    return 42\n"
+
+
+def test_cli_prints_utf8_when_stdout_is_a_pipe(tmp_path):
+    lib = tmp_path / "lib"
+    (lib / "zz").mkdir(parents=True)
+    (lib / "zz" / "sigma.py").write_text(_algo_source("zz.sigma", "Σ ≤ →"), encoding="utf-8")
+    # PYTHONIOENCODING and PYTHONUTF8 are unset (see _env), so a Windows pipe would default to cp1252.
+    for argv in (["algo", "search"], ["algo", "show", "zz.sigma"]):
+        r = subprocess.run([sys.executable, "-m", "abacus", *argv], capture_output=True, timeout=120,
+                           env=_env(lib))
+        assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+        text = r.stdout.decode("utf-8")  # must be utf-8, not cp1252
+        assert "Σ ≤ →" in text
+        json.loads(text)
+
+
+def test_main_survives_a_stdout_without_reconfigure(monkeypatch, capsys):
+    import io
+    monkeypatch.setattr(sys, "stdout", io.StringIO())  # a plain StringIO has no reconfigure()
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    assert main(["buttons"]) == 0
+
+
+def test_algo_run_keeps_stdout_clean_when_the_file_prints_at_import(tmp_path):
+    lib = tmp_path / "lib"
+    (lib / "zz").mkdir(parents=True)
+    f = lib / "zz" / "chatty.py"
+    f.write_text(_algo_source("zz.chatty", "Chatty", prelude="print('hello from import')\n"), encoding="utf-8")
+    r = subprocess.run([sys.executable, "-m", "abacus", "algo", "run", str(f), "compute"],
+                       capture_output=True, text=True, timeout=120, env=_env(lib))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["result"] == 42  # stdout is the JSON and nothing else
+    assert "hello from import" in r.stderr

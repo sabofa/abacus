@@ -71,6 +71,7 @@ def _child(name: str, module: str, inp: dict, seed, limit: float, mem_mb: int, c
 
 def call(name: str, inp: dict, *, time_s=None, mem_mb=None, in_process=False, full=False) -> Evidence:
     b = registry.get(name)
+    t_call = time.monotonic()
     cfg = get_config()
     inp = dict(inp)
     if inp.get("seed") is not None:
@@ -162,4 +163,9 @@ def call(name: str, inp: dict, *, time_s=None, mem_mb=None, in_process=False, fu
         ev.seed = seed
     ev.budget = {"time_s": round(time.monotonic() - t0, 3), "limit_s": limit,
                  "stopped": stopped, "mem_enforced": enforced}
+    if name == "algo_run":
+        # Every role run goes through here (run_role, the CLI's `abacus algo_run`, the MCP tool), so this
+        # is the one place a run is recorded in usage.jsonl (kit/06 s4). Imported late: roles imports budget.
+        from .algo.roles import record_usage
+        record_usage(inp.get("path"), inp.get("role"), ev, time.monotonic() - t_call)
     return ev

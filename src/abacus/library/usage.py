@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..config import get_config
+from . import store
 from ._jsonl import append_row, now_iso, read_rows
 
 
 def usage_path() -> Path:
-    return get_config().library / "usage.jsonl"
+    return store.library_dir() / "usage.jsonl"
 
 
 def record(algo: str, role: str, time_s: float, complete: bool) -> None:

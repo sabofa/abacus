@@ -27,7 +27,9 @@ class NoSuchAlgo(AlgoImportError, FileNotFoundError):
 
 
 def library_dir() -> Path:
-    return get_config().library
+    """The library directory, made absolute. A relative ABACUS_LIBRARY is taken from the working
+    directory at the moment of the call; every other path in the library is built on this one."""
+    return get_config().library.absolute()
 
 
 def _segments(parts, what: str) -> list[str]:
