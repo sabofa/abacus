@@ -40,3 +40,17 @@ def t_schema(inp, ctx):
 @_reg("t_raise", description="raises", input_schema=_ANY)
 def t_raise(inp, ctx):
     raise ValueError("boom")
+
+
+@_reg("t_polite", description="stops itself", input_schema=_ANY)
+def t_polite(inp, ctx):
+    while ctx.time_left() >= 0.05:
+        ctx.progress({"result": "bare", "scope": "bare progress", "method": "search"})
+        time.sleep(0.02)
+    return Evidence(button="t_polite", result="mine", method="timed", scope="stopped myself", complete=False)
+
+
+@_reg("t_raise_after", description="progress then raises", input_schema=_ANY)
+def t_raise_after(inp, ctx):
+    ctx.progress({"result": 3, "scope": "got to 3", "method": "search"})
+    raise ValueError("late")
