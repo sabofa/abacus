@@ -1,4 +1,4 @@
-# Ledger: abacus kit, first build
+﻿# Ledger: abacus kit, first build
 
 **Plan:** `docs/plans/2026-10-07-kit-build.md`. **Branch:** `kit/build`. **Rules:** Learn `build/osmosis/AGENT-SYSTEM.md`.
 
@@ -8,31 +8,31 @@
 
 | Task | Status | Commits | Review |
 |---|---|---|---|
-| T1 Foundation | [ ] | | |
-| T2 Surfaces | [ ] | | |
-| T3 Buttons: arithmetic and algebra | [ ] | | |
+| T1 Foundation | [x] | f7555a4 c5833dd a4e8c1e; fixes in 93d40ce, 76ae73b | READY after 2 rounds (Sonnet) |
+| T2 Surfaces | [x] | 93d40ce c4e2f5b a030c95; fixes bf16f47, f92e19f | 2 rounds (Sonnet); round 2 (the thread-safe flush) has a deterministic test but no re-review: the cap was reached |
+| T3 Buttons: arithmetic and algebra | [ ] waits on Ben B1 | | |
 | T4 Buttons: counting and discrete math | [ ] | | |
 | T5 Buttons: probability and quant | [ ] | | |
 | T6 Buttons: continuous math | [ ] | | |
 | T7 Buttons: CS | [ ] | | |
-| T8 Algorithm format | [ ] | | |
-| T9 Library | [ ] | | |
-| T10 Minting and examples | [ ] | | |
+| T8 Algorithm format | [x] | 522003c ae8f26a 1005b75; fixes 42e4c64, c127ca0 | READY after 2 rounds (Sonnet) | 522003c ae8f26a 1005b75; fixes 42e4c64 | Round 1 (Sonnet): NOT READY, 1 critical + 6 important. Re-review of 42e4c64: all fixed; 1 important left (mixed tuple/list equality) + minors, sent to round 2 (the cap). The T9 review checks the round-2 commit |
+| T9 Library | [x] | 0f76ae3 077bbc2 2b1cd50; fixes 7e42f2b, dd46621 | 2 rounds (Sonnet). Round 1's 4 important + 3 extras were READY on re-review. Round 2 (dd46621: child stdout → stderr, stale-lock race, startup_timeout usage) has tests but no re-review: the cap was reached |
+| T10 Minting and examples | [x] T10.1 + T10.2 · T10.3 waits on B1 | 7fc2653 cf32ab6; fixes 7a23fac, 8af1006 | 2 rounds (Sonnet). Round 1 had 2 important; its re-review left 1 (the link-fallback test). Round 2 (8af1006) has tests but no re-review: the cap was reached |
 
 ## Subtasks
 
 Each subtask's goal, files, test and acceptance line are in the plan. Copy them in here as each task starts, and tick them off as they finish.
 
-- [ ] T1.1  - [ ] T1.2  - [ ] T1.3 (risky: own review)
-- [ ] T2.1  - [ ] T2.2  - [ ] T2.3
+- [x] T1.1  - [x] T1.2  - [x] T1.3 (risky: own review)
+- [x] T2.1  - [x] T2.2  - [x] T2.3
 - [ ] T3.1  - [ ] T3.2  - [ ] T3.3
 - [ ] T4.1  - [ ] T4.2  - [ ] T4.3
 - [ ] T5.1  - [ ] T5.2
 - [ ] T6.1  - [ ] T6.2  - [ ] T6.3
 - [ ] T7.1  - [ ] T7.2
-- [ ] T8.1  - [ ] T8.2  - [ ] T8.3
-- [ ] T9.1  - [ ] T9.2  - [ ] T9.3
-- [ ] T10.1 - [ ] T10.2 - [ ] T10.3
+- [x] T8.1  - [x] T8.2  - [x] T8.3 (1005b75)
+- [x] T9.1  - [x] T9.2  - [x] T9.3 (2b1cd50)
+- [x] T10.1 - [x] T10.2 (cf32ab6) - [ ] T10.3 (waits on B1: the examples call buttons)
 
 ## Deltas from the spec
 
@@ -44,4 +44,26 @@ Record each one here, and in Learn `build/abacus/DELTA-FROM-SPEC.md` once that f
 
 ## Minors carried
 
-(none yet)
+- budget: numpy ints are rejected as time_s/seed; an invalid cfg.time_s default is reported as the caller's bad_input; an overrun inside the grace window carries no flag.
+- sandbox: `sys.__stdout__` writes bypass capture (it's not a security boundary); `abacus --pretty exp '{}'` (an option before the button) gives exit 2.
+- The full suite takes ~45–60 s because of spawned children (~3 s each); look at it once the buttons land.
+- Process: one agent's `git add -A` swept another agent's T1 fixes into 93d40ce. Stage paths only (now in AGENT-SYSTEM.md).
+- T8 review minors (logged, not fixed): lint feeds `check` only the right answer (a perturbed one would test it); demo has no positive test; lint doesn't flag a non-int `hand_space`.
+- T8 re-review minor (logged): lint never calls ctx.progress, so a lint killed at the hard limit loses the checks that had already finished (result=None).
+- make_compare on two numpy arrays: equal=False (pre-existing; round 2's normal form may cover it).
+- T10.1 judgement (for the T10 review): mint make runs roles in-process for speed, so an over-budget role is flagged `incomplete` but not killed. The calling button's child budget bounds the whole run.
+- T9 review minors (logged): links.add accepts a negative seed, an unknown algo and duplicates; algo show lacks the last lint result; a META id that disagrees with its path still loads in show.
+- T10 review minors (logged): concurrent `mint_review` calls can lose decisions (no lock); usage.jsonl gets one row per role call (304 for a 100-instance batch), which inflates most_used; mint/surface.py descriptions name Osmosis fields (documentation only).
+- T10 re-review minor (logged): mkstemp makes batch files 0600 on POSIX (doesn't matter on Windows).
+- T10 round-2 leftover (logged): sympify can still be slow on other pathological answers (e.g. factorial(10**7)); answer keys run outside any per-role budget.
+- T9 round-2 notes: the stale-lock break re-links a fresh lock with os.link (lost on filesystems without hard links); the race test fakes the stale check; there's no real two-thread stale test.
+
+## Deltas added during the build
+- Internal (non-spec) buttons are registered so that MCP lists them: run, algo_lint, algo_run, algo_search, algo_show, link_add, link_rm, link_find, mint_make, mint_review, mint_export (`INTERNAL` in tests/test_surfaces_agree.py). They also appear in the CLI `buttons` listing.
+- Every budget child sends stdout to stderr at the fd level (protects the MCP stdio stream); `run` captures its own.
+- mint make runs roles in-process for speed. The button's child budget bounds the whole batch.
+- Usage is recorded from budget.call (algo_run), once per role run.
+
+## Stop point, 2026-10-07 (abacus chat)
+Everything not blocked is built and reviewed: T1, T2, T8, T9, T10.1, T10.2. Full suite: 562 passing at dd46621.
+Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both wait on Ben's B1.
