@@ -8,6 +8,7 @@ A problem is a string, `"<code>: <message>"`; `split_problem` takes it apart.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
 
 from ..algo.loader import ANSWER_FORMATS
@@ -15,6 +16,8 @@ from ..evidence import jsonable
 
 NODE_PREFIX = "node:"
 MIN_CHOICES = 2
+# A Fraction with denominator 1, as a batch file spells it: "2/1".
+_WHOLE_RATIONAL = re.compile(r"\s*([+-]?\d+)\s*/\s*1\s*")
 
 # The codes a problem can have.
 BAD_TAGS, BAD_NODE_KEY, BAD_PROMPT = "bad_tags", "bad_node_key", "bad_prompt"
@@ -37,7 +40,8 @@ def _seq(v: Any) -> str:
 def render_answer(answer: dict) -> str:
     """An answer `{"format": ..., "value": ...}` as the text of a written item's `model_answer`.
 
-    integer and rational: `str(value)`. expression: the sympy string. tuple: `(a, b)`. set: `{a, b}`.
+    integer and rational: `str(value)`, and a rational with denominator 1 is the whole number (`2/1` is `2`).
+    expression: the sympy string. tuple: `(a, b)`. set: `{a, b}`.
     choice: the letter. text: as is. ValueError for anything that is not an answer, an unknown format, or
     an answer with no value.
     """
@@ -54,7 +58,9 @@ def render_answer(answer: dict) -> str:
             return str(items)
         inner = ", ".join(_seq(x) for x in items)
         return f"({inner})" if fmt == "tuple" else "{" + inner + "}"
-    return str(value)
+    text = str(value)
+    whole = _WHOLE_RATIONAL.fullmatch(text) if fmt == "rational" else None
+    return str(int(whole.group(1))) if whole else text
 
 
 def _label(inst: dict, position: int) -> str:
@@ -112,7 +118,8 @@ def _item(inst: dict, position: int, tags: list, node_keys: list, family_id: str
     statement = inst.get("statement")
     if not _text(statement):
         problems.append(f"{BAD_PROMPT}: {label} has no statement, so the item has no prompt")
-    item: dict = {"type": "mc" if inst.get("choices") is not None else "written",
+    # No choices, whether none or an empty list, is a written item.
+    item: dict = {"type": "mc" if inst.get("choices") else "written",
                   "prompt": statement if isinstance(statement, str) else ""}
     if item["type"] == "mc":
         item["choices"] = _choices(inst["choices"] if isinstance(inst["choices"], list) else [], label, problems)

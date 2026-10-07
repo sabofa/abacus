@@ -104,15 +104,33 @@ def render(head: dict | None, rows: list[dict]) -> bytes:
     return b"\n".join(lines) + b"\n"
 
 
-def write_atomic(path: Path, data: bytes) -> None:
-    """Replace `path` with `data`, or leave it as it was. The temp file is removed if anything fails."""
+def _link_new(tmp: str, path: Path) -> None:
+    """Give `tmp`'s content the name `path` unless a file has it already (FileExistsError). A hard link does
+    it in one step; where the file system has none, a look and a rename are the best there is."""
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        raise
+    except OSError:
+        if path.exists():
+            raise FileExistsError(f"{path} exists") from None
+        os.replace(tmp, path)
+
+
+def write_atomic(path: Path, data: bytes, *, exclusive: bool = False) -> None:
+    """Replace `path` with `data`, or leave it as it was. The temp file is removed if anything fails.
+
+    With `exclusive`, a file already at `path` is never replaced: FileExistsError, and it is left alone.
+    """
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+        if exclusive:
+            _link_new(tmp, path)
+        else:
+            os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)  # gone already after a replace; the link leaves it to go

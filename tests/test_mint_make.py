@@ -1,10 +1,14 @@
 """`abacus mint make`: batches, evidence, flags (kit/07 s2)."""
 import hashlib
 import json
+import os
 import re
+from fractions import Fraction
 from pathlib import Path
 
+import numpy as np
 import pytest
+import sympy
 
 from abacus import budget, mcp_server, registry
 from abacus.algo.loader import MetaError
@@ -119,6 +123,44 @@ def generate(rng, knobs):
 '''
 
 
+# The same value written five ways: it is two distinct answers, 1/2 and 1.
+MIXED_FORMS = _meta("tmp.mixed-forms", ["generate"], answer={"format": "rational"}) + '''
+from fractions import Fraction
+
+FORMS = [Fraction(1, 2), 0.5, "1/2", 1, 1.0]
+
+
+def generate(rng, knobs):
+    i = rng.randint(0, 4)
+    return {"params": {"i": i}, "statement": f"Form {i}.", "answer": FORMS[i]}
+'''
+
+# The same sets, listed in different orders; {1, 2} is the odd one out.
+SET_ORDERS = _meta("tmp.set-orders", ["generate"], answer={"format": "set"}) + '''
+ORDERS = [[1, 2, 3], [3, 2, 1], [2, 3, 1], [1, 2]]
+
+
+def generate(rng, knobs):
+    i = rng.randint(0, 3)
+    return {"params": {"i": i}, "statement": f"Order {i}.", "answer": ORDERS[i]}
+'''
+
+
+def _own_compare(algo_id, result):
+    """An algorithm whose check builds its own compare dict, with no `equal` and no `computed`."""
+    return _HEAD + _meta(algo_id, ["generate", "check"]) + f'''
+def check(params, proposed):
+    ev = Evidence(button="check", result={result!r}, method="exhaustive", scope="its own verdict")
+    ev.compare = {{"proposed": proposed, "note": "no equal here"}}
+    return ev
+
+
+def generate(rng, knobs):
+    a = rng.randint(0, 10**6)
+    return {{"params": {{"a": a}}, "statement": f"Find {{a}}.", "answer": a}}
+'''
+
+
 @pytest.fixture
 def lib(tmp_path, monkeypatch):
     d = tmp_path / "lib"
@@ -127,7 +169,9 @@ def lib(tmp_path, monkeypatch):
     for algo_id, name in ((POWER, "nt_power_mod.py"), (CONST, "lint_const.py"), (DISAGREE, "lint_disagree.py"),
                           (RANGE, "lint_range.py"), (ONE_OFF, "one_off.py"), (SLOW, "lint_slow_gen.py")):
         store.write(algo_id, (FIX / name).read_text(encoding="utf-8"))
-    for source in (CHECK_NO, POOL, PINNED, FLAKY, BAD_COMPUTE, WITH_DEMO, GEN_ONLY, NO_GENERATE, TEXT_ANSWER):
+    for source in (CHECK_NO, POOL, PINNED, FLAKY, BAD_COMPUTE, WITH_DEMO, GEN_ONLY, NO_GENERATE, TEXT_ANSWER,
+                   MIXED_FORMS, SET_ORDERS, _own_compare("tmp.own-true", True), _own_compare("tmp.own-false", False),
+                   _own_compare("tmp.own-none", None)):
         store.write(re.search(r"""['"]id['"]: ['"]([^'"]+)['"]""", source).group(1), source)
     return d
 
@@ -148,13 +192,11 @@ def message(inst, code):
     return next(f["message"] for f in inst["flags"] if f["code"] == code)
 
 
-def strip_time(x):
-    """Everything is the same between two runs but the clock, and the batch id the second run takes."""
-    if isinstance(x, dict):
-        return {k: strip_time(v) for k, v in x.items() if k not in ("time_s", "batch")}
-    if isinstance(x, (list, tuple)):
-        return [strip_time(v) for v in x]
-    return x
+def mask_run(text):
+    """A batch file's text with what a run owns masked: how long it took (every `time_s` value), and the
+    batch id it took. Nothing else in the text may differ between two runs."""
+    text = re.sub(r'"time_s": [-+0-9.eE]+', '"time_s": 0', text)
+    return re.sub(r'"batch": "\d{4}-\d\d-\d\d-[a-z0-9-]+-\d+"', '"batch": "ID"', text)
 
 
 # ---- the file ---------------------------------------------------------------
@@ -217,11 +259,14 @@ def test_seeds_are_derived_from_the_batch_seed_and_the_attempt():
 
 
 def test_same_algo_seed_and_knobs_give_the_same_instances(lib):
-    runs = [read_batch(make(POWER, count=6, seed=5, knobs={"m": 12})) for _ in range(2)]
-    assert strip_time(runs[0]) == strip_time(runs[1])
-    timed = read_batch(make(POWER, count=6, seed=5, knobs={"m": 12}, time_s=60))  # a budget changes nothing else
-    assert strip_time(timed[1]) == strip_time(runs[0][1])
+    paths = [make(POWER, count=6, seed=5, knobs={"m": 12}) for _ in range(2)]
+    texts = [p.read_text(encoding="utf-8") for p in paths]
+    assert texts[0] != texts[1]  # the second run took the next batch id; the mask below is what makes them equal
+    assert mask_run(texts[0]) == mask_run(texts[1])  # the raw text, byte for byte, but the clock and the id
+    timed = make(POWER, count=6, seed=5, knobs={"m": 12}, time_s=60).read_text(encoding="utf-8")
+    assert mask_run(timed).split("\n")[1:] == mask_run(texts[0]).split("\n")[1:]  # a budget changes no instance
     other = read_batch(make(POWER, count=6, seed=6, knobs={"m": 12}))
+    runs = [read_batch(p) for p in paths]
     assert [i["params"] for i in other[1]] != [i["params"] for i in runs[0][1]]
     assert all(i["params"]["m"] == 12 for i in runs[0][1])
     assert runs[0][0]["knobs"] == {"m": 12}
@@ -258,6 +303,73 @@ def test_a_family_with_distinct_answers_has_a_wide_spread(lib):
     assert "duplicate_answer" not in summary["flags_by_code"]
 
 
+def test_one_value_written_five_ways_is_two_answers_not_five(lib):
+    # 1/2, 0.5, "1/2" are one answer; 1 and 1.0 are another. The text differs, the value does not.
+    summary, insts = read_batch(make("tmp.mixed-forms", count=5, seed=2))
+    assert len(insts) == 5 and sorted(i["params"]["i"] for i in insts) == [0, 1, 2, 3, 4]
+    assert summary["answer_spread"] == 2
+    assert summary["flags_by_code"]["duplicate_answer"] == 5  # every instance shares its value with another
+    by_i = {i["params"]["i"]: i for i in insts}
+    for i, same in ((0, {1, 2}), (1, {0, 2}), (2, {0, 1}), (3, {4}), (4, {3})):
+        assert "duplicate_answer" in codes(by_i[i])
+        assert message(by_i[i], "duplicate_answer") == (
+            f"same answer as instance{'s' if len(same) > 1 else ''} "
+            + ", ".join(str(n) for n in sorted(by_i[k]["index"] for k in same)))
+
+
+def test_the_same_set_in_a_different_order_is_the_same_answer(lib):
+    summary, insts = read_batch(make("tmp.set-orders", count=4, seed=3))
+    assert len(insts) == 4 and summary["answer_spread"] == 2
+    odd = next(i for i in insts if i["params"]["i"] == 3)
+    assert "duplicate_answer" not in codes(odd)  # {1, 2} is not {1, 2, 3}
+    assert all("duplicate_answer" in codes(i) for i in insts if i is not odd)
+
+
+def _key(fmt, value):
+    return mk._answer_key({"format": fmt, "value": value})
+
+
+@pytest.mark.parametrize("fmt, a, b", [
+    ("integer", 2, 2.0), ("integer", 2, "2"), ("integer", 2, Fraction(2, 1)), ("integer", 2, "2/1"),
+    ("integer", 2, "4/2"), ("integer", 2, np.int64(2)), ("integer", -3, "-3.0"),
+    ("rational", Fraction(1, 2), 0.5), ("rational", "1/2", 0.5), ("rational", "2/4", Fraction(1, 2)),
+    ("rational", sympy.Rational(1, 2), "1/2"),
+    ("set", [1, 2, 3], [3, 1, 2]), ("set", {1, 2, 3}, [3, 2, 1]), ("set", [1, 1, 2], [2, 1]),
+    ("set", ["1/2", 1], [1.0, 0.5]), ("set", [[1, 2], [3, 4]], [[3, 4], [1, 2]]),
+    ("tuple", [1, "1/2"], (1.0, 0.5)), ("tuple", [[1, 2], 3], ([1.0, 2], "3")),
+    ("expression", "x+1", "1+x"), ("expression", "x + 1", "1 + x"), ("expression", "2", "1+1"),
+    ("expression", "0.5", "1/2"), ("expression", "2*x", "x*2"),
+    ("text", "hello", "hello"), ("choice", "A", "A"),
+])
+def test_answer_key_is_equal_for_equal_values(fmt, a, b):
+    assert _key(fmt, a) == _key(fmt, b)
+    assert hash(_key(fmt, a)) == hash(_key(fmt, b))
+
+
+@pytest.mark.parametrize("fmt, a, b", [
+    ("integer", 2, 3), ("integer", 1, True), ("rational", "1/2", "1/3"), ("integer", 0.1, "1/3"),
+    ("set", [1, 2, 3], [1, 2]), ("set", [1, 2], [[1, 2]]),
+    ("tuple", [1, 2], [2, 1]), ("tuple", [1, 2], [1, 2, 2]), ("tuple", [1, 2], [3]),
+    ("expression", "x+1", "x+2"), ("expression", "2", "x"), ("expression", "x*(x+1)", "x**2 + x"),  # not expanded
+    ("text", "1/2", "0.5"), ("choice", "A", "B"),
+])
+def test_answer_key_differs_for_different_values(fmt, a, b):
+    assert _key(fmt, a) != _key(fmt, b)
+
+
+def test_a_tuple_and_a_set_with_the_same_members_are_not_the_same_answer():
+    assert _key("tuple", [1, 2]) != _key("set", [1, 2])
+
+
+def test_answer_key_falls_back_to_the_text_when_the_value_cannot_be_read():
+    for fmt, v in (("expression", "x squared"), ("expression", "((("), ("integer", "many"), ("rational", None),
+                   ("set", "not a list"), ("integer", float("nan")), ("integer", float("inf")),
+                   ("expression", {"a": 1}), ("text", {"a": [1, 2]})):
+        key = _key(fmt, v)
+        assert key == _key(fmt, v) and hash(key) == hash(key)
+    assert _key("integer", float("nan")) != _key("integer", float("inf"))
+
+
 def test_derivations_disagree_when_compute_differs_from_generate(lib):
     summary, insts = read_batch(make(DISAGREE, count=4, seed=1))
     assert len(insts) == 4  # flagged, not dropped
@@ -273,6 +385,19 @@ def test_derivations_disagree_when_check_rejects_the_generated_answer(lib):
     msg = message(insts[0], "derivations_disagree")
     assert msg.startswith("check") and "compute returned" not in msg
     assert [e["button"] for e in insts[0]["evidence"]] == ["algo_run", "check"]
+
+
+def test_a_check_with_its_own_compare_dict_does_not_kill_the_batch(lib):
+    # No `equal` and no `computed` in the dict: the result bool is the verdict, when there is one.
+    _, yes = read_batch(make("tmp.own-true", count=2, seed=1))
+    assert [codes(i) for i in yes] == [[], []]
+    _, no = read_batch(make("tmp.own-false", count=2, seed=1))
+    assert [codes(i) for i in no] == [["derivations_disagree"]] * 2
+    msg = message(no[0], "derivations_disagree")
+    assert msg.startswith("check does not accept") and "it computed" not in msg  # nothing computed to quote
+    s, none = read_batch(make("tmp.own-none", count=2, seed=1))  # no verdict at all, from a role that finished
+    assert [codes(i) for i in none] == [["derivations_disagree"]] * 2 and s["made"] == 2
+    assert none[0]["evidence"][0]["compare"]["note"] == "no equal here"
 
 
 def test_out_of_range(lib):
@@ -380,7 +505,23 @@ def test_stored_evidence_is_the_roles_work_without_run_specific_detail(lib):
         assert ev["input"] == {} and set(ev["budget"]) == {"time_s", "stopped"} and ev["budget"]["stopped"] is False
         assert not any("in process" in n for n in ev["notes"])
     assert "produced by the check role" in insts[0]["evidence"][1]["notes"][0]
-    assert str(FIX) not in json.dumps(insts) and str(lib) not in json.dumps(insts)
+
+
+def test_no_batch_file_holds_a_path_of_this_machine(lib, tmp_path):
+    """On Windows `str(path)` has single backslashes and the JSON file doubles them, so look for the path as
+    the file spells it, and with forward slashes. A role that raises is in here too: its error notes."""
+    broken = tmp_path / "elsewhere" / "bad_compute.py"
+    broken.parent.mkdir()
+    broken.write_text(BAD_COMPUTE, encoding="utf-8")
+    texts = [make(POWER, count=3, seed=1, time_s=60).read_text(encoding="utf-8"),
+             make(str(FIX / "lint_const.py"), count=2, seed=1).read_text(encoding="utf-8"),
+             make("tmp.bad-compute", count=2, seed=1).read_text(encoding="utf-8"),
+             make(str(broken), count=2, seed=1).read_text(encoding="utf-8")]
+    assert "compute is broken" in texts[2] and "compute is broken" in texts[3]  # the error notes are in the text
+    for text in texts:
+        for where in (lib, FIX, tmp_path):
+            for spelling in (json.dumps(str(where))[1:-1], where.as_posix(), str(where)):
+                assert spelling not in text, f"{spelling!r} is in a batch file"
 
 
 def test_signals_are_on_hold(lib):
@@ -388,6 +529,61 @@ def test_signals_are_on_hold(lib):
     s, insts = read_batch(make(POWER, count=2, seed=1))
     assert "signals on hold (difficulty design pending)" in s["notes"]
     assert all(i["signals"] == {} for i in insts)
+
+
+# ---- writing the file -------------------------------------------------------
+
+def litter(lib):
+    return sorted(p.name for p in (lib / "batches").iterdir() if not p.name.endswith(".jsonl"))
+
+
+def test_a_finished_batch_leaves_nothing_but_its_file(lib):
+    path = make(POWER, count=3, seed=1)
+    assert [p.name for p in (lib / "batches").iterdir()] == [path.name]
+
+
+def test_the_file_appears_under_its_id_whole_or_not_at_all(lib, monkeypatch):
+    """A kill part way through writing must not leave a partial file under the batch id."""
+    real_link, real_replace, seen = os.link, os.replace, []
+
+    def whole_when_it_appears(src, dst, *a, **kw):
+        assert not Path(dst).exists()  # nothing is under the id until the content is complete
+        lines = Path(src).read_bytes().split(b"\n")
+        assert lines[-1] == b"" and all(json.loads(line) for line in lines[:-1])
+        seen.append(Path(dst).name)
+
+    monkeypatch.setattr(os, "link", lambda s, d, *a, **kw: (whole_when_it_appears(s, d), real_link(s, d, *a, **kw))[1])
+    monkeypatch.setattr(os, "replace", lambda s, d, *a, **kw: (whole_when_it_appears(s, d), real_replace(s, d, *a, **kw))[1])
+    path = make(POWER, count=3, seed=1)
+    assert seen == [path.name]
+
+
+@pytest.mark.parametrize("boom", [OSError("disk full"), KeyboardInterrupt()])
+def test_a_write_that_dies_leaves_no_file_under_the_id_and_no_temp_file(lib, monkeypatch, boom):
+    def dies(fd):
+        raise boom
+
+    with monkeypatch.context() as m:  # not monkeypatch.undo(): that would also undo the library's setenv
+        m.setattr(os, "fsync", dies)
+        with pytest.raises(type(boom)):
+            make(POWER, count=3, seed=1)
+    assert list((lib / "batches").iterdir()) == []
+    assert make(POWER, count=3, seed=1).name == f"{DAY}-power-mod-01.jsonl"  # the id was never taken
+
+
+def test_a_file_that_turns_up_during_the_write_is_not_replaced(lib, monkeypatch):
+    """Two makes at once: whoever's file is there first stays, and the other takes the next number."""
+    batches = lib / "batches"
+    real_taken, theirs = mk._taken_numbers, batches / f"{DAY}-power-mod-01.jsonl"
+
+    def late(*a):
+        found = real_taken(*a)
+        theirs.write_text("theirs", encoding="utf-8")  # appears after the scan, before our write
+        return found
+
+    monkeypatch.setattr(mk, "_taken_numbers", late)
+    assert make(POWER, count=2, seed=1).name == f"{DAY}-power-mod-02.jsonl"
+    assert theirs.read_text(encoding="utf-8") == "theirs" and litter(lib) == []
 
 
 # ---- bad input --------------------------------------------------------------

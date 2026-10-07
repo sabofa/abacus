@@ -96,6 +96,14 @@ def five(lib):
     ({"format": "rational", "value": "3/4"}, "3/4"),
     ({"format": "rational", "value": Fraction(3, 4)}, "3/4"),
     ({"format": "rational", "value": 5}, "5"),
+    ({"format": "rational", "value": Fraction(2, 1)}, "2"),
+    ({"format": "rational", "value": "2/1"}, "2"),          # a Fraction(2, 1) in a batch file is the text "2/1"
+    ({"format": "rational", "value": "-6/1"}, "-6"),
+    ({"format": "rational", "value": "0/1"}, "0"),
+    ({"format": "rational", "value": "21/10"}, "21/10"),    # only a denominator of 1 goes
+    ({"format": "rational", "value": "1/12"}, "1/12"),
+    ({"format": "expression", "value": "2/1"}, "2/1"),      # as written: it is not a rational
+    ({"format": "text", "value": "2/1"}, "2/1"),
     ({"format": "expression", "value": "x**2 + 1"}, "x**2 + 1"),
     ({"format": "expression", "value": sp.Symbol("x") ** 2 + 1}, "x**2 + 1"),
     ({"format": "tuple", "value": [1, 2]}, "(1, 2)"),
@@ -212,7 +220,6 @@ def codes_of(problems):
     ([{"body": "1", "correct": False}, {"body": "2", "correct": False}], "mc_choices"),                     # none correct
     ([{"body": "1", "correct": True}, {"body": "2", "correct": True}, {"body": "3", "correct": False}], "mc_choices"),
     ([{"body": "1", "correct": True}], "mc_choices"),                                                       # one choice
-    ([], "mc_choices"),
 ])
 def test_an_mc_item_needs_two_choices_and_exactly_one_correct(choices, code):
     payload, problems = to_create_questions([inst(5, choices=choices)], tags=["t"], batch_id=BATCH)
@@ -220,6 +227,12 @@ def test_an_mc_item_needs_two_choices_and_exactly_one_correct(choices, code):
     assert "instance 5" in problems[0]
     assert payload["questions"][0]["type"] == "mc"          # the item is still in the payload
     assert len(payload["questions"][0]["choices"]) == len(choices)
+
+
+def test_an_empty_choices_list_is_no_choices_so_the_item_is_written():
+    payload, problems = to_create_questions([inst(5, choices=[])], tags=["t"], batch_id=BATCH)
+    q = payload["questions"][0]
+    assert problems == [] and q["type"] == "written" and "choices" not in q and q["model_answer"] == "5"
 
 
 def test_the_zero_correct_message_says_so():

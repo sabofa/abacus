@@ -24,10 +24,13 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+import sympy
+
 from ..algo.loader import LoadedAlgo, load_algo, validate_knobs
 from ..algo.roles import Instance, run_role
 from ..evidence import Evidence, jsonable, make_compare
 from ..library import store
+from . import batchfile
 
 ATTEMPTS_PER_INSTANCE = 5  # kit/07 s2: stop after count x 5 attempts
 MIN_ROLE_S = 0.05  # the least budget a role is given once the batch's own budget has run out
@@ -69,6 +72,76 @@ def _is_int(x: Any) -> bool:
 def _canon(x: Any) -> str:
     """A key that is equal for equal params, statements or answers."""
     return json.dumps(jsonable(x), sort_keys=True, ensure_ascii=False)
+
+
+def _number(x: Any) -> Fraction | None:
+    """The exact value of a number written as an int, a float (as printed: 0.5 is 1/2), a Fraction or a
+    string such as "1/2", "-3" or "0.25". None for anything else, bool and nan and inf included."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, Fraction)):
+        return Fraction(x)
+    try:
+        if isinstance(x, float):
+            return Fraction(str(x))
+        if isinstance(x, str):
+            return Fraction(x.strip())
+    except (ValueError, ZeroDivisionError):  # "nan", "inf", "x squared", "1/0"
+        pass
+    return None
+
+
+def _expression_key(x: Any) -> tuple:
+    """Two expressions that sympy builds the same way are the same key: `x+1` and `1 + x`. A rational
+    value is a number's key, so `2` and `1+1` meet. Text sympy cannot read is keyed by the text."""
+    n = _number(x)
+    if n is not None:
+        return ("n", n)
+    if isinstance(x, str):
+        try:
+            e = sympy.sympify(x)
+            if e.is_Rational:
+                return ("n", Fraction(int(e.p), int(e.q)))
+            return ("e", sympy.srepr(e))
+        except Exception:  # noqa: BLE001  (SympifyError, SyntaxError, TypeError, ...: it is not an expression)
+            pass
+    return ("j", _canon(x))
+
+
+def _member_key(x: Any) -> tuple:
+    """A member of a tuple or a set: a number by its value, a list as a tuple of its members, any other
+    text as an expression (which is the text itself when sympy cannot read it)."""
+    n = _number(x)
+    if n is not None:
+        return ("n", n)
+    if isinstance(x, list):
+        return ("t", tuple(_member_key(m) for m in x))
+    if isinstance(x, str):
+        return _expression_key(x)
+    return ("j", _canon(x))
+
+
+def _answer_key(answer: dict) -> tuple:
+    """A hashable key that is equal for answers with the same value, whatever their JSON text: `1/2`,
+    `0.5` and `"1/2"`; `[3, 1, 2]` and `[1, 2, 3]` as sets; `x+1` and `1+x`. It is built from the answer's
+    format, and no pair of answers is compared (that is too slow for a batch of a thousand).
+
+    integer and rational: the exact number. set: the members' keys, unordered. tuple: the members' keys,
+    in order. expression: sympy's own form (as written, not expanded or simplified). Everything else, and
+    anything that does not parse as its format says, is keyed by its JSON text.
+    """
+    fmt, value = answer.get("format"), jsonable(answer.get("value"))
+    if fmt in ("integer", "rational"):
+        n = _number(value)
+        if n is not None:
+            return ("n", n)
+    elif fmt == "set" and isinstance(value, list):
+        return ("set", frozenset(_member_key(m) for m in value))
+    elif fmt == "tuple" and isinstance(value, list):
+        return ("tuple", tuple(_member_key(m) for m in value))
+    elif fmt == "expression":
+        return _expression_key(value)
+    return ("j", _canon(value))
 
 
 def _show(x: Any, limit: int = 80) -> str:
@@ -134,16 +207,10 @@ def _taken_numbers(batches: Path, date: str, slug: str) -> list[int]:
     return [int(m.group(1)) for f in batches.iterdir() if (m := pat.match(f.name))]
 
 
-def _line(row: dict) -> bytes:
-    try:
-        return json.dumps(row, ensure_ascii=False).encode("utf-8")
-    except UnicodeEncodeError:  # a lone surrogate somewhere in a statement
-        return json.dumps(row).encode("utf-8")
-
-
 def _write_batch(slug: str, render) -> tuple[str, Path]:
     """Create the next free `<library>/batches/<date>-<slug>-<nn>.jsonl`, never over a file that is there.
-    `render(batch_id)` gives the file's lines."""
+    `render(batch_id)` gives the file's bytes. They are written to a temp file beside it and moved to the
+    id in one step, so the id never names a partial file, even if this process is killed while writing."""
     batches = store.library_dir() / "batches"
     batches.mkdir(parents=True, exist_ok=True)
     date = _today()
@@ -152,14 +219,10 @@ def _write_batch(slug: str, render) -> tuple[str, Path]:
         batch_id = f"{date}-{slug}-{n:02d}"
         path = batches / f"{batch_id}.jsonl"
         try:
-            with open(path, "xb") as f:
-                f.write(b"\n".join(render(batch_id)) + b"\n")
+            batchfile.write_atomic(path, render(batch_id), exclusive=True)
         except FileExistsError:
             n += 1
             continue
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
         return batch_id, path
 
 
@@ -246,9 +309,14 @@ def make_batch(algo_ref, *, count: int, seed: int, knobs: dict | None = None,
             ev = call("check", args={"params": inst.params, "proposed": answer})
             evidence.append(ev)
             undone.append(_unfinished("check", ev))
-            verdict = ev.compare["equal"] if ev.compare else (ev.result if isinstance(ev.result, bool) else None)
+            # A check may build its own compare dict, with no `equal` and no `computed`: then the result
+            # bool is the verdict if there is one, and if there is none it gave no verdict.
+            cmp = ev.compare if isinstance(ev.compare, dict) else {}
+            verdict = cmp.get("equal")
+            if verdict is None and isinstance(ev.result, bool):
+                verdict = ev.result
             if verdict is False or (verdict is None and ev.complete):
-                computed = f" (it computed {_show(ev.compare['computed'])})" if ev.compare else ""
+                computed = f" (it computed {_show(cmp['computed'])})" if "computed" in cmp else ""
                 disagree.append(f"check does not accept generate's answer {_show(answer)}{computed}")
         inst.evidence = evidence
         if has["demo"]:
@@ -268,7 +336,7 @@ def make_batch(algo_ref, *, count: int, seed: int, knobs: dict | None = None,
         undone = [u for u in undone if u]
         if undone:
             flags["incomplete"] = "; ".join(undone)
-        rec = {"inst": inst, "attempt": attempts, "flags": flags}
+        rec = {"inst": inst, "attempt": attempts, "flags": flags, "akey": _answer_key(inst.answer)}
         kept.append(rec)
         by_params[key] = rec
 
@@ -278,11 +346,12 @@ def make_batch(algo_ref, *, count: int, seed: int, knobs: dict | None = None,
         by_params[key]["flags"]["duplicate_params"] = (
             f"generate gave these params again on {len(again)} later attempt{'s' if many else ''} "
             f"({_others(again)}); the repeat{'s were' if many else ' was'} skipped")
-    for code, what, of in (("duplicate_statement", "statement", lambda r: r["inst"].statement),
-                           ("duplicate_answer", "answer", lambda r: r["inst"].answer["value"])):
-        groups: dict[str, list[int]] = {}
+    # Statements are equal as text; answers are equal as values (`_answer_key`).
+    for code, what, of in (("duplicate_statement", "statement", lambda r: _canon(r["inst"].statement)),
+                           ("duplicate_answer", "answer", lambda r: r["akey"])):
+        groups: dict[Any, list[int]] = {}
         for pos, rec in enumerate(kept, start=1):
-            groups.setdefault(_canon(of(rec)), []).append(pos)
+            groups.setdefault(of(rec), []).append(pos)
         for members in groups.values():
             if len(members) > 1:
                 for pos in members:
@@ -319,13 +388,13 @@ def make_batch(algo_ref, *, count: int, seed: int, knobs: dict | None = None,
         "duplicates_skipped": len(skipped), "duplicate_attempts": skipped,
         "generate_failures": len(failures),
         "flags_by_code": {c: n for c, n in by_code.items() if n},
-        "answer_spread": len({_canon(r["answer"]["value"]) for r in rows}),
+        "answer_spread": len({rec["akey"] for rec in kept}),
         "time_s": round(time.monotonic() - t0, 3), "notes": notes,
     }
 
-    def render(batch_id: str) -> list[bytes]:
+    def render(batch_id: str) -> bytes:
         summary["batch"] = batch_id
-        return [_line({"summary": summary}), *map(_line, rows)]
+        return batchfile.render(summary, rows)
 
     _, path = _write_batch(meta["id"].rsplit(".", 1)[-1], render)
     return path, summary
