@@ -34,7 +34,17 @@ How an AI comes up with original problems, at the level of AMC 12, AIME, quant i
   - To test depth: push one dimension up on a strong area.
 - **Problems must be new to the world.** So a novelty check is needed against Ben's bank and wider sources. Disguised copies slip past plain similarity checks (`01` §2).
 
-## Open questions for Ben
+## Ben's answers to B1–B5 (2026-10-07, relayed by the "Osmosis projects inventory" session)
+
+| # | Answer |
+|---|---|
+| B1 | **Keep all 14 buttons.** The buttons get built. `construct` still waits on spec 3's geometry design |
+| B2 | **No Lean or local prover for now**: "wait until i get a better computer (next year)". Spec 3 designs proof checking without them, with a slot to add them later |
+| B3 | **A one-time expert calibration.** Ben's precalc professor rates one set of 10–20 problems, once. Spec 3 treats it as a one-time calibration set; after that, Ben's own ratings carry it. Still to do: a one-page rating sheet. It mixes real past-contest problems and kit-made ones, unlabelled, at AMC 10/12 and AIME level, with a short rubric (well-posed? right difficulty? interesting rather than mechanical? would you use it?), and takes 30–45 minutes |
+| B4 | **OEIS is off by default**, as built |
+| B5 | **Osmosis keeps `tech:`** (a rendering requirement). Learn's technique tags and abacus use `technique:`. The Learn bank's tags get renamed only if spec 3 or export needs them, and the rename is noted when it happens |
+
+## Open questions for Ben (all answered above)
 
 | # | Question | Blocks |
 |---|---|---|
