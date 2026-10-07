@@ -71,11 +71,17 @@ SCHEMA = {
 
 
 class StateCap(Exception):
-    pass
+    def __init__(self, found: int, cap: int, matrix: bool = False):
+        super().__init__(found, cap, matrix)
+        self.found, self.cap, self.matrix = found, cap, matrix
 
 
 class Stopped(Exception):
     pass
+
+
+class ExactTimeout(Exception):
+    """Exact arithmetic used up its share of the time budget; the float path can still finish."""
 
 
 class Singular(Exception):
@@ -111,8 +117,10 @@ class Nums:
             digits = len(decimal.Decimal(repr(x)).as_tuple().digits)
             if digits <= 15:
                 return exact
+            # a long float is read as a simple fraction only when it is within a few ulps of one (so 1/3 written
+            # as 0.3333333333333333 is 1/3, but 3.333333333333333e-14 is not 0 and 0.9999999999999667 is not 1)
             near = Fraction(x).limit_denominator(10 ** 6)
-            if abs(float(near) - x) <= 1e-12 * max(1.0, abs(x)):
+            if near != 0 and abs(float(near) - x) <= 1e-15 * abs(x):
                 self.simplified = True
                 return near
             self.clean = False
@@ -160,7 +168,7 @@ class Chain:
         i = self.index.get(s)
         if i is None:
             if len(self.states) >= self.cap:
-                raise StateCap()
+                raise StateCap(len(self.states), self.cap)
             i = self.index[s] = len(self.states)
             self.states.append(s)
             self.rows.append(None)
@@ -248,7 +256,7 @@ def build_chain(inp: dict, ctx, nums: Nums) -> Chain:
         if any(len(r) != n for r in m):
             raise BadInput(f"matrix must be square: {n} rows, but the row lengths are {sorted({len(r) for r in m})}")
         if n > cap:
-            raise StateCap()
+            raise StateCap(n, cap, matrix=True)
         st = inp.get("states")
         if st is None:
             st = list(range(n))
@@ -355,9 +363,10 @@ def reverse_reach(seeds: list[int], pred: list[list[int]]) -> set[int]:
 
 # ----------------------------------------------------------------------------------------------- linear algebra
 
-def linsolve(ctx, n: int, coeffs: list[dict], rhs: list[dict], exact: bool) -> list[list]:
+def linsolve(ctx, n: int, coeffs: list[dict], rhs: list[dict], exact: bool, soft: float | None = None) -> list[list]:
     """Solve A X = B. coeffs[r] is row r of A as {col: Fraction}; rhs[k] is column k of B as {row: Fraction}.
-    Returns X as n lists of len(rhs) values (Fractions when exact, else floats)."""
+    Returns X as n lists of len(rhs) values (Fractions when exact, else floats). Exact elimination raises
+    ExactTimeout once time.monotonic() passes `soft`, and Stopped when the whole budget is spent."""
     k = len(rhs)
     if n == 0:
         return []
@@ -373,6 +382,8 @@ def linsolve(ctx, n: int, coeffs: list[dict], rhs: list[dict], exact: bool) -> l
         remaining = set(range(n))
         pivot_of: dict[int, int] = {}
         for c in range(n):
+            if soft is not None and time.monotonic() > soft:
+                raise ExactTimeout()
             if ctx.time_left() <= 0.05:
                 raise Stopped()
             cand = [r for r in remaining if c in rows[r]]
@@ -384,6 +395,8 @@ def linsolve(ctx, n: int, coeffs: list[dict], rhs: list[dict], exact: bool) -> l
             prow = {key: v * inv for key, v in rows[p].items()}
             rows[p] = prow
             for r in range(n):
+                if soft is not None and time.monotonic() > soft:
+                    raise ExactTimeout()
                 if r != p and c in rows[r]:
                     f = rows[r][c]
                     rr = rows[r]
@@ -427,6 +440,7 @@ class Run:
         self.chain, self.nums, self.ctx = chain, nums, ctx
         self.exact = True
         self.notes: list[str] = []
+        self.flags: list[tuple[str, str]] = []
         self.labels: list[str] = []
 
     def decide(self, n: int, what: str = "states") -> None:
@@ -442,10 +456,33 @@ class Run:
             self.notes.append(f"exact rational arithmetic ({n} {what}, at most {EXACT_MAX})")
         else:
             self.notes.append("floating point (float64), not exact: " + "; ".join(reasons))
+
+    def finish_notes(self) -> None:
+        """Notes that depend on how the run ended (so on whether the arithmetic stayed exact)."""
         if self.nums.simplified:
             self.notes.append("float entries with many digits (such as 0.3333333333333333) were read as the "
                               "nearest simple fraction (1/3)" + ("" if self.exact else
                                                                  ", but the arithmetic is floating point anyway"))
+
+    def fall_back(self, how: str = "floats used (floating point, float64, not exact)") -> None:
+        """Exact arithmetic ran out of its share of the time budget: say so and carry on in floating point."""
+        self.exact = False
+        self.notes = [n for n in self.notes if not n.startswith("exact rational arithmetic")]
+        self.notes.append(f"exact arithmetic exceeded the time budget; {how}")
+        self.flags.append(("exact_timeout", "exact arithmetic did not finish within its share of the time budget, "
+                           "so the result was computed in floating point (float64) and is not exact"))
+
+    def solve(self, n: int, coeffs: list[dict], rhs: list[dict]) -> list[list]:
+        """linsolve in the run's arithmetic; exact falls back to floats if it takes more than half the time left."""
+        if self.exact:
+            soft = time.monotonic() + 0.5 * self.ctx.time_left()
+            try:
+                return linsolve(self.ctx, n, coeffs, rhs, True, soft)
+            except ExactTimeout:
+                self.fall_back()
+        if self.ctx.time_left() <= 0.05:
+            raise Stopped()
+        return linsolve(self.ctx, n, coeffs, rhs, False)
 
     def out(self, x: Fraction) -> Any:
         return sp.Rational(x.numerator, x.denominator) if self.exact else float(x)
@@ -484,7 +521,7 @@ def op_absorb(inp: dict, run: Run) -> tuple[dict, str, Any]:
             else:
                 rhs[cls[j]][k] = rhs[cls[j]].get(k, Fraction(0)) + p
     rhs[len(rec)] = _ones(len(trans))
-    X = linsolve(run.ctx, len(trans), coeffs, rhs, run.exact)
+    X = run.solve(len(trans), coeffs, rhs)
     absorption, steps = {}, {}
     one = run.out(Fraction(1))
     for i in range(n):
@@ -561,7 +598,7 @@ def op_hitting(inp: dict, run: Run) -> tuple[dict, str, Any]:
         for j, p in ch.rows[s]:
             if j in pos:
                 coeffs[k][pos[j]] = coeffs[k].get(pos[j], 0) - p
-    X = linsolve(run.ctx, len(unknown), coeffs, [_ones(len(unknown))], run.exact)
+    X = run.solve(len(unknown), coeffs, [_ones(len(unknown))])
     steps: dict[str, Any] = {}
     for i in range(n):
         if i in tset:
@@ -609,13 +646,12 @@ def op_stationary(inp: dict, run: Run) -> tuple[dict, str, Any]:
     labs = run.labels = ch.labels()
     succ = ch.succ()
     rec, _ = closed_classes(succ)
-    zero = run.out(Fraction(0))
     classes, dists = [], []
     for members in rec:
         m = len(members)
         pos = {s: k for k, s in enumerate(members)}
         if m == 1:
-            dist = {members[0]: run.out(Fraction(1))}
+            dist = {members[0]: Fraction(1)}
         else:
             coeffs: list[dict] = [dict() for _ in range(m)]
             for s in members:
@@ -625,20 +661,20 @@ def op_stationary(inp: dict, run: Run) -> tuple[dict, str, Any]:
             for k in range(m):
                 coeffs[k][k] = coeffs[k].get(k, 0) - 1
             coeffs[m - 1] = _ones(m)
-            X = linsolve(run.ctx, m, coeffs, [{m - 1: Fraction(1)}], run.exact)
-            dist = {s: run.val(X[pos[s]][0]) for s in members}
+            X = run.solve(m, coeffs, [{m - 1: Fraction(1)}])
+            dist = {s: X[pos[s]][0] for s in members}
         dists.append(dist)
         classes.append({"states": [labs[s] for s in members], "period": _period(members, succ)})
     res: dict[str, Any] = {"recurrent_classes": classes}
     headline: Any = None
     if len(rec) == 1:
-        full = {labs[i]: dists[0].get(i, zero) for i in range(n)}
+        full = {labs[i]: run.val(dists[0].get(i, Fraction(0))) for i in range(n)}
         res["stationary"] = full
         headline = full
     else:
         res["stationary"] = None
         for c, d in zip(classes, dists):
-            c["stationary"] = {labs[s]: v for s, v in d.items()}
+            c["stationary"] = {labs[s]: run.val(v) for s, v in d.items()}
         run.notes.append(f"the chain has {len(rec)} recurrent classes, so there is no single stationary "
                          "distribution; one is given for each class (see recurrent_classes)")
     for c in classes:
@@ -766,8 +802,9 @@ def op_stop(inp: dict, run: Run) -> tuple[dict, str, Any]:
 
 # -------------------------------------------------------------------------------------------------- game
 
-def _simplex_game(A: list[list[Fraction]]) -> tuple[Fraction, list[Fraction], list[Fraction]]:
-    """Value, row strategy and column strategy of the game A (the row player maximizes), exactly."""
+def _simplex_game(A: list[list[Fraction]], soft: float | None = None) -> tuple[Fraction, list[Fraction], list[Fraction]]:
+    """Value, row strategy and column strategy of the game A (the row player maximizes), exactly.
+    Raises ExactTimeout once time.monotonic() passes `soft`."""
     m, n = len(A), len(A[0])
     shift = 1 - min(min(r) for r in A)
     B = [[a + shift for a in r] for r in A]              # all entries >= 1
@@ -778,6 +815,8 @@ def _simplex_game(A: list[list[Fraction]]) -> tuple[Fraction, list[Fraction], li
     obj = [Fraction(-1)] * n + [Fraction(0)] * m + [Fraction(0)]
     basis = [n + i for i in range(m)]
     while True:
+        if soft is not None and time.monotonic() > soft:
+            raise ExactTimeout()
         j = next((c for c in range(cols) if obj[c] < 0), None)
         if j is None:
             break
@@ -793,6 +832,8 @@ def _simplex_game(A: list[list[Fraction]]) -> tuple[Fraction, list[Fraction], li
         pv = tab[r][j]
         tab[r] = [v / pv for v in tab[r]]
         for i in range(m):
+            if soft is not None and time.monotonic() > soft:
+                raise ExactTimeout()
             if i != r and tab[i][j] != 0:
                 f = tab[i][j]
                 tab[i] = [a - f * b for a, b in zip(tab[i], tab[r])]
@@ -855,17 +896,27 @@ def op_game(inp: dict, run: Run) -> tuple[dict, str, Any]:
     if not nums.clean:
         reasons.append("some entries are floats that are not simple fractions")
     run.exact = not reasons
+    timed_out = False
     if run.exact:
-        v, x, y = _simplex_game(A)
-        if _verify_game(A, v, x, y):
-            run.notes.append("exact rational arithmetic (simplex over fractions); the strategies were checked "
-                             "exactly against the value")
-            res: dict[str, Any] = {"value": run.out(v), "row_strategy": [run.out(p) for p in x],
-                                   "col_strategy": [run.out(p) for p in y], "verified_exactly": True}
-            return res, f"the {m}x{n} zero-sum game; the row player maximizes", res["value"]
-        run.exact = False
-        reasons.append("the exact solution failed its own check")
-    run.notes.append("floating point (float64, scipy linprog), not exact: " + "; ".join(reasons))
+        soft = time.monotonic() + 0.5 * run.ctx.time_left()
+        try:
+            v, x, y = _simplex_game(A, soft)
+        except ExactTimeout:
+            run.fall_back("floats used (floating point, float64, scipy linprog, not exact)")
+            timed_out = True
+        else:
+            if _verify_game(A, v, x, y):
+                run.notes.append("exact rational arithmetic (simplex over fractions); the strategies were "
+                                 "checked exactly against the value")
+                res: dict[str, Any] = {"value": run.out(v), "row_strategy": [run.out(p) for p in x],
+                                       "col_strategy": [run.out(p) for p in y], "verified_exactly": True}
+                return res, f"the {m}x{n} zero-sum game; the row player maximizes", res["value"]
+            run.exact = False
+            reasons.append("the exact solution failed its own check")
+    if not timed_out:
+        run.notes.append("floating point (float64, scipy linprog), not exact: " + "; ".join(reasons))
+    if run.ctx.time_left() <= 0.05:
+        raise Stopped()
     vf, xf, yf = _linprog_game(np.array([[float(a) for a in r] for r in A]))
     res = {"value": vf, "row_strategy": xf, "col_strategy": yf, "verified_exactly": False}
     return res, f"the {m}x{n} zero-sum game; the row player maximizes", vf
@@ -875,15 +926,17 @@ OPS_FN = {"absorb": op_absorb, "hitting": op_hitting, "stationary": op_stationar
           "game": op_game}
 
 
-def _parse_proposed(p: Any, run: Run) -> Any:
+def _parse_proposed(p: Any, run: Run, nums: Nums) -> Any:
+    """proposed, in the run's number type. `nums` is its own reader, apart from the chain's, so the notes about
+    the chain's entries stay about the chain."""
     if isinstance(p, dict):
-        return {k: _parse_proposed(v, run) for k, v in p.items()}
+        return {k: _parse_proposed(v, run, nums) for k, v in p.items()}
     if isinstance(p, list):
-        return [_parse_proposed(v, run) for v in p]
+        return [_parse_proposed(v, run, nums) for v in p]
     if p is None:
         return None
     try:
-        return run.out(run.nums.num(p, "proposed"))
+        return run.out(nums.num(p, "proposed"))
     except BadInput:
         raise BadInput(f"proposed {D.short(p, 40)} could not be read as a number or a string like \"1/6\"") from None
 
@@ -898,19 +951,29 @@ def _run(inp: dict, ctx) -> Evidence:
         if op != "game":
             chain = run.chain = build_chain(inp, ctx, nums)
         res, scope, headline = OPS_FN[op](inp, run)
-    except StateCap:
-        found = chain.n if chain else 0
-        cap = chain.cap if chain else MAX_STATES
-        ev = Evidence(button=NAME, result={"states_discovered": found}, method="symbolic", complete=False,
-                      scope=f"search from the start stopped at the cap of {cap} states; nothing was solved "
+    except StateCap as e:
+        if e.matrix:
+            ev = Evidence(button=NAME, result={"matrix_states": e.found}, method="symbolic", complete=False,
+                          scope=f"the matrix has {e.found} states, more than the cap of {e.cap} (max_states); "
+                                "nothing was solved")
+            ev.flag("state_cap", f"the matrix has {e.found} states but max_states is {e.cap}; raise max_states, "
+                    "or give a smaller matrix")
+            return ev
+        ev = Evidence(button=NAME, result={"states_discovered": e.found}, method="symbolic", complete=False,
+                      scope=f"search from the start stopped at the cap of {e.cap} states; nothing was solved "
                             "because the reachable set is larger than that (it may be infinite)")
-        ev.flag("state_cap", f"more than {cap} states are reachable from the start; raise max_states, or "
+        ev.flag("state_cap", f"more than {e.cap} states are reachable from the start; raise max_states, or "
                 "give a smaller chain")
         return ev
     except Stopped:
         found = chain.n if chain else 0
-        ev = Evidence(button=NAME, result={"states_discovered": found}, method="symbolic", complete=False,
-                      scope=f"stopped at the time budget with {found} states found; nothing was solved")
+        ev = Evidence(button=NAME, result={"states_discovered": found}, method=run.method, complete=False,
+                      scope=f"stopped at the time budget before a result was computed ({found} states found); "
+                            "no result")
+        ev.flag("stopped_before_result", "the time budget ran out before any result was computed; give a "
+                "larger time budget or a smaller chain")
+        for code, msg in run.flags:
+            ev.flag(code, msg)
         return ev
     except Singular:
         ev = Evidence(button=NAME, result=None, method=run.method, complete=False,
@@ -918,10 +981,18 @@ def _run(inp: dict, ctx) -> Evidence:
                             "no result")
         ev.flag("singular", "the linear system was singular or too ill-conditioned to solve")
         return ev
-    p0 = _parse_proposed(inp["proposed"], run) if inp.get("proposed") is not None else None
+    run.finish_notes()
+    p0 = None
+    if inp.get("proposed") is not None:
+        pnums = Nums()
+        p0 = _parse_proposed(inp["proposed"], run, pnums)
+        if pnums.simplified:
+            run.notes.append("proposed: a float with many digits was read as the nearest simple fraction")
     ev = Evidence(button=NAME, result=jsonable(res), method=run.method, scope=scope, complete=True,
                   precision=None if run.exact else "float64")
     ev.notes.extend(run.notes)
+    for code, msg in run.flags:
+        ev.flag(code, msg)
     if p0 is not None:
         if headline is None:
             ev.notes.append("there is no single value to compare proposed with")

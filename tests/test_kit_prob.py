@@ -1,6 +1,9 @@
 """The probability buttons: simulate, markov (kit/04 s7-8, known answers kit/09 s1)."""
 import math
+import sys
+import types
 
+import numpy as np
 import pytest
 import sympy as sp
 
@@ -179,6 +182,173 @@ def test_trial_mixing_bool_and_numbers_is_flagged():
 def test_scope_of_a_sampled_result_does_not_overclaim():
     ev = run("simulate", {"trial": TWO_DICE_SEVEN, "trials": 1000, "seed": 1})
     assert "estimate" in ev.scope and "seed 1" in ev.scope
+
+
+
+# ------------------------------------------------------------------------- review round 1: reproducibility
+
+def _fake_clock(step):
+    state = {"t": 0.0}
+
+    def monotonic():
+        state["t"] += step
+        return state["t"]
+    return types.SimpleNamespace(monotonic=monotonic)
+
+
+SMALL_DTYPE_TRIALS = {
+    "uint8": "lambda rng, n: rng.integers(0, 2, n, dtype=np.uint8) == 1",
+    "uint16": "lambda rng, n: rng.integers(0, 2, n, dtype=np.uint16) == 1",
+    "bool": "lambda rng, n: rng.integers(0, 2, n, dtype=bool)",
+    "uint8-values": "lambda rng, n: rng.integers(0, 200, n, dtype=np.uint8)",
+    "int64": "lambda rng, n: rng.integers(1, 7, n) + rng.integers(1, 7, n)",
+}
+
+
+@pytest.mark.parametrize("name", sorted(SMALL_DTYPE_TRIALS))
+def test_vectorized_results_do_not_depend_on_cpu_timing(name, monkeypatch):
+    sim = sys.modules["abacus.kit.simulate"]
+    inp = {"trial": SMALL_DTYPE_TRIALS[name], "vectorized": True, "trials": 2_000_000, "seed": 3}
+    results = []
+    for step in (0.0, 0.004, 0.09, 3.0):
+        monkeypatch.setattr(sim, "time", _fake_clock(step))
+        results.append(stable(run("simulate", dict(inp))))
+    assert all(r == results[0] for r in results[1:])
+    monkeypatch.undo()
+    assert stable(run("simulate", dict(inp))) == results[0]
+
+
+def test_scalar_results_do_not_depend_on_cpu_timing(monkeypatch):
+    sim = sys.modules["abacus.kit.simulate"]
+    inp = {"trial": "rng.random() * rng.randint(1, 6)", "trials": 30_000, "seed": 11}
+    results = []
+    for step in (0.0, 0.004, 3.0):
+        monkeypatch.setattr(sim, "time", _fake_clock(step))
+        results.append(stable(run("simulate", dict(inp))))
+    assert all(r == results[0] for r in results[1:])
+
+
+# ------------------------------------------------------------------------------- review round 1: small n
+
+def _t95(df):
+    from scipy.stats import t
+    return float(t.ppf(0.975, df))
+
+
+def test_two_trials_get_a_t_interval_and_an_honest_note():
+    ev = run("simulate", {"trial": "rng.normal(0, 1)", "trials": 2, "seed": 1})
+    r = ev.result
+    assert r["trials_run"] == 2 and r["std_error"] > 0
+    lo, hi = r["ci95"]
+    assert math.isclose((hi - lo) / 2, _t95(1) * r["std_error"], rel_tol=1e-9)     # 12.7 standard errors, not 1.96
+    assert (hi - lo) / 2 > 12 * r["std_error"]
+    assert math.isclose(ev.precision["ci95_halfwidth"], (hi - lo) / 2)
+    assert "Student" in r["interval"] and "1 degree" in r["interval"]
+    assert any("not reliable" in n for n in ev.notes)
+
+
+def test_the_multiplier_follows_the_degrees_of_freedom_and_settles_to_the_normal_value():
+    for n, df in ((5, 4), (10, 9), (29, 28), (60, 59)):
+        ev = run("simulate", {"trial": "rng.normal(0, 1)", "trials": n, "seed": 2})
+        lo, hi = ev.result["ci95"]
+        assert math.isclose((hi - lo) / 2 / ev.result["std_error"], _t95(df), rel_tol=1e-9), n
+    ev = run("simulate", {"trial": "rng.normal(0, 1)", "trials": 20_000, "seed": 2})
+    lo, hi = ev.result["ci95"]
+    assert math.isclose((hi - lo) / 2 / ev.result["std_error"], 1.959963984540054, rel_tol=2e-4)
+    assert not any("reliable" in n for n in ev.notes)
+
+
+def test_few_trials_note_below_thirty_but_not_at_thirty():
+    assert any("not reliable" in n for n in run("simulate", {"trial": "rng.normal(0, 1)", "trials": 29,
+                                                            "seed": 2}).notes)
+    assert not any("not reliable" in n for n in run("simulate", {"trial": "rng.normal(0, 1)", "trials": 30,
+                                                                "seed": 2}).notes)
+
+
+def test_a_zero_variance_sample_has_a_flagged_interval_and_no_infinite_z():
+    ev = run("simulate", {"trial": "5", "trials": 100, "seed": 1, "proposed": 6})
+    r = ev.result
+    assert r["variance"] == 0 and r["ci95"] == [5, 5]
+    assert any("not reliable" in n and "identical" in n for n in ev.notes)
+    c = ev.compare
+    assert c["z"] is None and c["standard_error"] == 0
+    assert any("z-score" in n or "z score" in n for n in ev.notes)
+    for p in (5, "5", 5.5, 0):
+        ev = run("simulate", {"trial": "5", "trials": 100, "seed": 1, "proposed": p})
+        assert ev.compare["z"] is None
+        assert not any(isinstance(v, float) and not math.isfinite(v) for v in ev.compare.values())
+    # a bool trial whose proposed probability is 0 or 1 has a zero standard error too
+    for p in (0, 1):
+        ev = run("simulate", {"trial": "rng.random() < 0.5", "trials": 100, "seed": 1, "proposed": p})
+        assert ev.compare["z"] is None and any("z-score" in n for n in ev.notes)
+
+
+def test_dice_intervals_still_contain_the_truth_at_every_size():
+    ev = run("simulate", {"trial": TWO_DICE_SEVEN, "trials": 200_000, "seed": 12345})
+    assert ev.result["ci95"][0] < 1 / 6 < ev.result["ci95"][1]
+    for n, seed in ((40, 3), (500, 4), (100_000, 5)):
+        ev = run("simulate", {"trial": "rng.randint(1, 6)", "trials": n, "seed": seed})
+        lo, hi = ev.result["ci95"]
+        assert lo < 3.5 < hi, (n, lo, hi)
+
+
+def test_one_trial_has_no_interval_claim_beyond_infinity_and_a_note():
+    ev = run("simulate", {"trial": "rng.normal(0, 1)", "trials": 1, "seed": 1, "proposed": 0})
+    assert ev.result["std_error"] is None and ev.compare["z"] is None
+    assert any("not reliable" in n for n in ev.notes)
+
+
+# ------------------------------------------------------------------------------------ review round 1: the Rng
+
+def test_rng_spawn_gives_independent_deterministic_children():
+    sim = sys.modules["abacus.kit.simulate"]
+    kids = sim.Rng(5).spawn(3)
+    assert len(kids) == 3 and all(isinstance(k, sim.Rng) and hasattr(k, "py") for k in kids)
+    draws = [(k.random(), k.integers(0, 10**9), k.randint(1, 10**9)) for k in kids]
+    assert len(set(draws)) == 3
+    again = [(k.random(), k.integers(0, 10**9), k.randint(1, 10**9)) for k in sim.Rng(5).spawn(3)]
+    assert draws == again
+    assert [k.random() for k in sim.Rng(6).spawn(3)] != [d[0] for d in draws]
+
+
+def test_rng_survives_deepcopy_copy_and_pickle_with_both_streams():
+    import copy
+    import pickle
+    sim = sys.modules["abacus.kit.simulate"]
+    base = sim.Rng(3)
+    base.random(), base.integers(0, 9, 4)              # advance both streams
+    for clone in (copy.deepcopy(base), copy.copy(base), pickle.loads(pickle.dumps(base))):
+        assert isinstance(clone, sim.Rng) and clone is not base and clone.py is not base.py
+        probe = copy.deepcopy(base)
+        assert clone.random() == probe.random()
+        assert clone.integers(0, 10**9, 3).tolist() == probe.integers(0, 10**9, 3).tolist()
+        assert clone.py.random() == probe.py.random()
+        assert clone.randint(1, 10**6) == probe.randint(1, 10**6)
+    # the clone is independent: advancing it leaves the original alone
+    snap = copy.deepcopy(base)
+    clone = copy.deepcopy(base)
+    clone.py.random(), clone.integers(0, 9, 10)
+    assert base.py.random() == snap.py.random() and base.integers(0, 10**9) == snap.integers(0, 10**9)
+
+
+def test_rng_sample_accepts_sets_frozensets_and_mixed_sets():
+    sim = sys.modules["abacus.kit.simulate"]
+    r = sim.Rng(8)
+    s = {3, 1, 2, 9, 7}
+    got = r.sample(s, 3)
+    assert len(got) == 3 and len(set(got)) == 3 and set(got) <= s
+    assert sim.Rng(8).sample(s, 3) == got                                  # deterministic, sorted before sampling
+    assert sim.Rng(8).sample(s, 3) == sim.Rng(8).sample(sorted(s), 3)
+    assert set(r.sample(frozenset("abcdef"), 4)) <= set("abcdef")
+    mixed = {1, "a", (2, 3)}                                               # not comparable: iteration order
+    assert set(r.sample(mixed, 2)) <= mixed
+    assert len(r.sample({}.keys() | {5, 6}, 2)) == 2
+    assert r.sample([1, 2, 3], 2) and r.sample(range(5), 5) and r.sample("abc", 1)
+
+
+def test_a_trial_can_sample_from_a_set():
+    ev = run("simulate", {"trial": "len(rng.sample({1, 2, 3, 4, 5}, 2))", "trials": 50, "seed": 2})
+    assert ev.complete and ev.result["mean"] == 2 and "bad_input" not in flags(ev)
 
 
 # ------------------------------------------------------------------------------------------------ markov
@@ -436,7 +606,8 @@ def test_exact_below_200_states_and_float_above_with_a_note():
     # floats that are not simple fractions switch to float arithmetic too
     ev = run("markov", {"op": "stationary", "matrix": [[0.123456789012345678, 0.876543210987654322],
                                                        [0.5, 0.5]]})
-    assert ev.method in ("symbolic", "numeric")
+    assert ev.method == "numeric" and any("float" in n for n in ev.notes)
+    assert abs(ev.result["stationary"]["0"] - 0.5 / (0.5 + 0.876543210987654322)) < 1e-12
     ev = run("markov", {"op": "hitting", "matrix": [[0.5, 0.25, 0.2500000001], [0, 1, 0], [0, 0, 1]],
                         "target": [1, 2]})
     assert ev.method == "numeric" and any("float" in n for n in ev.notes)
@@ -492,7 +663,176 @@ def test_proposed_compare_for_markov():
     assert ev.compare["equal"] is True
 
 
-def test_every_markov_op_is_deterministic():
+def _op_cases():
+    """One input per op, each with a matrix form or a step-function form (whose states are found by search)."""
     states, rows = coin_chain("HT")
-    inp = {"op": "hitting", "matrix": rows, "states": states, "start": "", "target": ["HT"]}
-    assert stable(run("markov", dict(inp))) == stable(run("markov", dict(inp)))
+    step = ("def step(s):\n"
+            "    if s == 'HT': return [(s, 1)]\n"
+            "    nxt = {'': ('', 'H'), 'H': ('H', 'HT')}[s]\n"
+            "    return [(nxt[0], '1/2'), (nxt[1], '1/2')]\n")
+    walk = ("def step(i):\n"
+            "    if i in (0, 6): return []\n"
+            "    return [(i + 1, '1/3'), (i - 1, '2/3')]\n")
+    big = np.random.default_rng(3).integers(-9, 10, size=(45, 45)).tolist()      # solved in floats
+    return {
+        "absorb-matrix": {"op": "absorb", "matrix": gamblers_ruin(6)},
+        "absorb-step": {"op": "absorb", "start": 3, "step": walk},
+        "hitting-matrix": {"op": "hitting", "matrix": rows, "states": states, "start": "", "target": ["HT"]},
+        "hitting-step": {"op": "hitting", "start": "", "step": step, "target": "state == 'HT'"},
+        "stationary-matrix": {"op": "stationary", "matrix": [["1/2", "1/2", 0], ["1/4", "1/2", "1/4"],
+                                                              [0, "1/2", "1/2"]]},
+        "stationary-step": {"op": "stationary", "start": "", "step": step},
+        "stop-step": {"op": "stop", "start": 0, "step": "[(k, '1/6') for k in range(1, 7)]", "payoff": "state",
+                      "horizon": 3},
+        "stop-matrix": {"op": "stop", "matrix": [[0, 1], [1, 0]], "payoff": {"0": 1, "1": 4}, "horizon": 2},
+        "game-exact": {"op": "game", "matrix": [[3, 2], [1, 4]]},
+        "game-float": {"op": "game", "matrix": big},
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_op_cases()))
+def test_every_markov_op_is_deterministic(case):
+    inp = _op_cases()[case]
+    a, b = run("markov", dict(inp)), run("markov", dict(inp))
+    assert a.complete and not a.flags
+    assert stable(a) == stable(b)
+
+
+def test_markov_is_deterministic_across_processes_with_string_states():
+    # a fresh process has a fresh string hash seed, so anything that leans on set or dict-of-set order would show
+    states, rows = coin_chain("HHT")
+    inp = {"op": "absorb", "matrix": rows, "states": states}
+    a, b = budget.call("markov", dict(inp), time_s=60), budget.call("markov", dict(inp), time_s=60)
+    assert a.complete and stable(a) == stable(b)
+
+
+# ------------------------------------------------------------------------- review round 1: float to fraction
+
+def test_nums_accepts_only_a_float_that_is_a_few_ulps_from_a_simple_fraction():
+    from fractions import Fraction
+    from abacus.kit.markov import Nums
+    for x, want in ((0.3333333333333333, Fraction(1, 3)), (0.1666666666666667, Fraction(1, 6)),
+                    (0.6666666666666666, Fraction(2, 3)), (0.25, Fraction(1, 4)), (0.1, Fraction(1, 10))):
+        assert Nums().num(x, "x") == want
+    nums = Nums()
+    assert nums.num(0.3333333333333333, "x") == Fraction(1, 3) and nums.simplified and nums.clean
+    # a tiny probability is itself, never 0, and a near-one is never 1
+    for x in (3.333333333333333e-14, 0.9999999999999667, 1.2345678901234568e-9, 0.12345678901234568):
+        nums = Nums()
+        got = nums.num(x, "x")
+        assert got != 0 and float(got) == x and nums.simplified is False and nums.clean is False, x
+    # random 17-digit floats are essentially never taken for simple fractions
+    changed = 0
+    for x in np.random.default_rng(0).random(2000).tolist():
+        nums = Nums()
+        nums.num(x, "x")
+        changed += nums.simplified
+    assert changed <= 2
+
+
+def test_a_tiny_escape_probability_gives_a_huge_hitting_time_not_inf():
+    m = [[0.9999999999999667, 3.33e-14], [0, 1]]
+    ev = run("markov", {"op": "hitting", "matrix": m, "target": [1]})
+    assert ev.method == "numeric" and ev.complete and ev.precision
+    got = ev.result["expected_steps"]["0"]
+    assert got != math.inf and math.isclose(got, 1 / 3.33e-14, rel_tol=1e-6)
+    assert any("float" in n and "not simple fractions" in n for n in ev.notes)
+    ev = run("markov", {"op": "hitting", "matrix": [[0.9999999999999667, 3.333333333333333e-14], [0, 1]],
+                        "target": [1]})
+    assert math.isclose(ev.result["expected_steps"]["0"], 3e13, rel_tol=1e-2)
+
+
+def test_game_reads_long_floats_as_fractions_and_says_so():
+    ev = run("markov", {"op": "game", "matrix": [[0.3333333333333333, 1], [1, 0.6666666666666666]]})
+    assert exact(ev) and sp.sympify(ev.result["value"]) == R(7, 9)
+    assert any("nearest simple fraction" in n for n in ev.notes)
+
+
+def test_game_float_matrix_does_not_claim_a_fraction_it_did_not_read():
+    ev = run("markov", {"op": "game", "matrix": [[0.1234567890123456789, -1.5], [2.718281828459045, 0.3]]})
+    assert ev.method == "numeric" and not any("nearest simple fraction" in n for n in ev.notes)
+
+
+def test_a_long_float_proposed_is_snapped_with_a_note_only_when_it_is_a_few_ulps_away():
+    m = [[1, 0], [0, 1]]
+    ev = run("markov", {"op": "game", "matrix": m, "proposed": 0.5000000000000001})
+    assert ev.compare["equal"] is True
+    assert any("proposed" in n and "nearest simple fraction" in n for n in ev.notes)
+    for far in (0.5000000000001, 0.123456789012345678):
+        ev = run("markov", {"op": "game", "matrix": m, "proposed": far})
+        assert ev.compare["equal"] is False
+        assert not any("proposed" in n and "nearest simple fraction" in n for n in ev.notes)
+
+
+def test_a_matrix_over_max_states_reports_its_own_size_and_cap():
+    ev = run("markov", {"op": "stationary", "matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "max_states": 2})
+    assert "state_cap" in flags(ev) and ev.complete is False
+    assert "3" in ev.scope and "2" in ev.scope and "5000" not in ev.scope
+    assert "search from the start" not in ev.scope and "matrix" in ev.scope
+    ev = run("markov", {"op": "stationary", "matrix": [[1, 0], [0, 1]], "max_states": 1})
+    assert "2" in ev.scope and "1" in ev.scope and "5000" not in ev.scope
+
+
+# ------------------------------------------------------------------------- review round 1: time budgets
+
+def _dense_chain(n, seed=0):
+    w = np.random.default_rng(seed).integers(1, 10, size=(n, n))
+    return [[f"{int(v)}/{int(row.sum())}" for v in row] for row in w]
+
+
+def _is_float_result_with_note(ev):
+    return (ev.result is not None and ev.method == "numeric" and "exact_timeout" in flags(ev)
+            and any("exact arithmetic exceeded the time budget; floats used" in n for n in ev.notes))
+
+
+def test_dense_exact_chain_over_its_budget_falls_back_to_floats_or_is_flagged():
+    ev = budget.call("markov", {"op": "stationary", "matrix": _dense_chain(150)}, time_s=3)
+    if ev.result is None or ev.complete is False:
+        assert "stopped_before_result" in flags(ev) and ev.scope.strip()
+        return
+    assert _is_float_result_with_note(ev) and ev.precision
+    dist = list(ev.result["stationary"].values())
+    assert abs(sum(dist) - 1) < 1e-9 and min(dist) >= -1e-12
+
+
+def test_exact_stationary_timeout_in_process_gives_the_float_answer():
+    ev = run("markov", {"op": "stationary", "matrix": _dense_chain(200, 1)}, time_s=3)
+    assert ev.complete and _is_float_result_with_note(ev), (ev.scope, flags(ev), ev.notes)
+    dist = ev.result["stationary"]
+    assert len(dist) == 200 and abs(sum(dist.values()) - 1) < 1e-9
+    assert not any(n.startswith("exact rational arithmetic") for n in ev.notes)
+    assert any("floating point" in n for n in ev.notes)
+
+
+def test_exact_hitting_and_absorb_timeouts_fall_back_too():
+    n = 160
+    rows = _dense_chain(n, 2)
+    rows[n - 1] = ["0"] * (n - 1) + ["1"]            # the last state absorbs
+    for op, inp in (("hitting", {"op": "hitting", "matrix": rows, "target": [n - 1]}),
+                    ("absorb", {"op": "absorb", "matrix": rows})):
+        ev = run("markov", inp, time_s=3)
+        assert ev.complete and _is_float_result_with_note(ev), (op, ev.scope, flags(ev))
+
+
+def test_exact_game_timeout_falls_back_to_linprog_with_the_note():
+    from abacus.kit.markov import _linprog_game
+    g = np.random.default_rng(5).integers(1, 10**14, size=(40, 40))
+    A = [[f"{int(v)}/{10**14}" for v in row] for row in g]
+    ev = run("markov", {"op": "game", "matrix": A}, time_s=3)
+    assert ev.complete and _is_float_result_with_note(ev), (ev.scope, flags(ev), ev.notes)
+    assert ev.result["verified_exactly"] is False
+    vf, _, _ = _linprog_game(g / 10**14)
+    assert abs(ev.result["value"] - vf) < 1e-9
+    assert abs(sum(ev.result["row_strategy"]) - 1) < 1e-9
+
+
+def test_a_state_search_the_budget_stops_is_flagged_as_stopped_before_a_result():
+    ev = run("markov", {"op": "hitting", "start": 0, "step": "[(state + 1, 1)]", "target": [-1],
+                        "max_states": 10**9}, time_s=0.5)
+    assert ev.complete is False and "stopped_before_result" in flags(ev)
+    assert "before" in ev.scope and "result" in ev.scope
+
+
+def test_exact_arithmetic_within_budget_is_unchanged_and_unflagged():
+    ev = run("markov", {"op": "stationary", "matrix": gamblers_ruin(8)}, time_s=30)
+    assert exact(ev) and not flags(ev) and not any("exceeded" in n for n in ev.notes)
