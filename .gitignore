@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+library/.index.sqlite
+library/usage.jsonl
+*.egg-info/

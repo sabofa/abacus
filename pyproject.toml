@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abacus"
+version = "0.1.0"
+description = "A math toolkit for AI: a calculator that reports evidence and never judges answers."
+requires-python = ">=3.11"
+dependencies = ["sympy", "mpmath", "numpy", "scipy", "networkx", "hypothesis", "mcp", "jsonschema"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+nt = []
+solve = []
+
+[project.scripts]
+abacus = "abacus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
