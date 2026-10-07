@@ -10,8 +10,8 @@
 |---|---|---|---|
 | T1 Foundation | [x] | f7555a4 c5833dd a4e8c1e; fixes in 93d40ce, 76ae73b | READY after 2 rounds (Sonnet) |
 | T2 Surfaces | [x] | 93d40ce c4e2f5b a030c95; fixes bf16f47, f92e19f | 2 rounds (Sonnet); round 2 (the thread-safe flush) has a deterministic test but no re-review: the cap was reached |
-| T3 Buttons: arithmetic and algebra | [ ] waits on Ben B1 | | |
-| T4 Buttons: counting and discrete math | [ ] | | |
+| T3 Buttons: arithmetic and algebra | [~] built (8c6e573); review round 1 NOT READY (1 critical: parser string-eval hole, 3 important); fixer running | 8c6e573 | |
+| T4 Buttons: counting and discrete math | [~] built (a9790c2); review running | a9790c2 | |
 | T5 Buttons: probability and quant | [ ] | | |
 | T6 Buttons: continuous math | [ ] | | |
 | T7 Buttons: CS | [ ] | | |
@@ -25,8 +25,8 @@ Each subtask's goal, files, test and acceptance line are in the plan. Copy them 
 
 - [x] T1.1  - [x] T1.2  - [x] T1.3 (risky: own review)
 - [x] T2.1  - [x] T2.2  - [x] T2.3
-- [ ] T3.1  - [ ] T3.2  - [ ] T3.3
-- [ ] T4.1  - [ ] T4.2  - [ ] T4.3
+- [x] T3.1  - [x] T3.2  - [x] T3.3
+- [x] T4.1  - [x] T4.2  - [x] T4.3
 - [ ] T5.1  - [ ] T5.2
 - [ ] T6.1  - [ ] T6.2  - [ ] T6.3
 - [ ] T7.1  - [ ] T7.2
@@ -67,3 +67,5 @@ Record each one here, and in Learn `build/abacus/DELTA-FROM-SPEC.md` once that f
 ## Stop point, 2026-10-07 (abacus chat)
 Everything not blocked is built and reviewed: T1, T2, T8, T9, T10.1, T10.2. Full suite: 562 passing at dd46621.
 Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both wait on Ben's B1.
+- T3 review minors (logged): Domain.sample float-bound edge (~5e-18 outside); finite integer domains stay `unknown` after exhaustive agreement.
+- B1 answered 2026-10-07: keep all 14 buttons (T3–T7 + T10.3 unblocked; construct waits on spec 3). B2: no Lean/prover for now. B3: one-time expert rating of 10–20 problems (rating sheet still to prepare). B4: OEIS off. B5: Osmosis keeps tech:, abacus uses technique:.
