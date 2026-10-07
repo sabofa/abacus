@@ -74,9 +74,27 @@ def _canon(x: Any) -> str:
     return json.dumps(jsonable(x), sort_keys=True, ensure_ascii=False)
 
 
+# An answer's key is worked out exactly and outside any budget, so text that would make that slow is keyed by
+# the text instead: a long string, a decimal exponent of 5+ digits (Fraction("1e9999999") builds 10**9999999),
+# a power with an exponent of 5+ digits, and a tower of powers (9**9**9, 9^9^9, 9**(9**9)).
+MAX_KEY_CHARS = 200
+_POW = r"(?:\*\*|\^)"
+_COSTLY = re.compile(
+    r"[eE][+-]?[\d_]{5,}"                      # 1e9999999, 1e-9999999, 1e9_999_999
+    rf"|{_POW}\s*[+-]?\s*\(?\s*[\d_]{{5,}}"       # x**99999999, 2**(99999999
+    rf"|{_POW}\s*[\w.]+\s*{_POW}"               # 9**9**9: a tower with a bare exponent
+    rf"|{_POW}\s*\([^()]*{_POW}"                # 9**(9**9): a power in a parenthesised exponent
+)
+
+
+def _costly(text: str) -> bool:
+    return len(text) > MAX_KEY_CHARS or _COSTLY.search(text) is not None
+
+
 def _number(x: Any) -> Fraction | None:
     """The exact value of a number written as an int, a float (as printed: 0.5 is 1/2), a Fraction or a
-    string such as "1/2", "-3" or "0.25". None for anything else, bool and nan and inf included."""
+    string such as "1/2", "-3" or "0.25". None for anything else, bool and nan and inf included, and for
+    a string that is too long or has too large an exponent to be worth working out (see `_costly`)."""
     if isinstance(x, bool):
         return None
     if isinstance(x, (int, Fraction)):
@@ -84,7 +102,7 @@ def _number(x: Any) -> Fraction | None:
     try:
         if isinstance(x, float):
             return Fraction(str(x))
-        if isinstance(x, str):
+        if isinstance(x, str) and not _costly(x):
             return Fraction(x.strip())
     except (ValueError, ZeroDivisionError):  # "nan", "inf", "x squared", "1/0"
         pass
@@ -93,11 +111,12 @@ def _number(x: Any) -> Fraction | None:
 
 def _expression_key(x: Any) -> tuple:
     """Two expressions that sympy builds the same way are the same key: `x+1` and `1 + x`. A rational
-    value is a number's key, so `2` and `1+1` meet. Text sympy cannot read is keyed by the text."""
+    value is a number's key, so `2` and `1+1` meet. Text sympy cannot read, or that is too costly to work
+    out (`_costly`), is keyed by the text."""
     n = _number(x)
     if n is not None:
         return ("n", n)
-    if isinstance(x, str):
+    if isinstance(x, str) and not _costly(x):
         try:
             e = sympy.sympify(x)
             if e.is_Rational:

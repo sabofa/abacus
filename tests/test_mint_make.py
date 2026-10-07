@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from fractions import Fraction
 from pathlib import Path
 
@@ -368,6 +369,29 @@ def test_answer_key_falls_back_to_the_text_when_the_value_cannot_be_read():
         key = _key(fmt, v)
         assert key == _key(fmt, v) and hash(key) == hash(key)
     assert _key("integer", float("nan")) != _key("integer", float("inf"))
+
+
+@pytest.mark.parametrize("fmt, value", [
+    ("integer", "1e9999999"), ("integer", "1e9_999_999"), ("rational", "1e-9999999"), ("integer", "9" * 500),
+    ("expression", "9**9**9"), ("expression", "9^9^9"), ("expression", "9**(9**9)"), ("expression", "x**99999999"),
+    ("expression", "1e9999999"), ("expression", "+".join(["x"] * 150)),
+    ("set", ["1e9999999", 2]), ("tuple", [1, "9**9**9"]),
+])
+def test_answer_key_of_a_pathological_answer_is_the_text_and_is_quick(fmt, value):
+    start = time.monotonic()
+    key = _key(fmt, value)
+    assert time.monotonic() - start < 1
+    assert key == _key(fmt, value) and hash(key) == hash(key)
+
+
+def test_answer_key_still_reads_the_ordinary_answers_next_to_the_pathological_ones():
+    assert _key("integer", "1e5") == _key("integer", 100000)
+    assert _key("expression", "x**2 + y**2") == _key("expression", "y**2 + x**2")
+    assert _key("expression", "x**2*y**3") == _key("expression", "y**3*x**2")
+    assert _key("expression", "2**10") == _key("integer", 1024)
+    assert _key("expression", "x^2 + x") == _key("expression", "x + x**2")
+    assert _key("expression", "x**(y+1) + z**2") == _key("expression", "z**2 + x**(y+1)")
+    assert _key("expression", "9**9**9")[0] == "j"
 
 
 def test_derivations_disagree_when_compute_differs_from_generate(lib):

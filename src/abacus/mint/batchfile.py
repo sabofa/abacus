@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -104,17 +105,40 @@ def render(head: dict | None, rows: list[dict]) -> bytes:
     return b"\n".join(lines) + b"\n"
 
 
+def _rename_new(tmp: str, path: Path) -> None:
+    """Windows: `os.rename` raises FileExistsError, atomically, when `path` exists; `os.replace` would
+    overwrite it. So a look and then a replace is never used here: a file made in between would be lost."""
+    os.rename(tmp, path)
+
+
+def _create_new(tmp: str, path: Path) -> None:
+    """Elsewhere: `path` is made with O_EXCL (FileExistsError if it exists, and the file there is not
+    touched), then `tmp`'s bytes are copied in. A reader could see it part-written; it never replaces one
+    that was already there. If the copy fails the half-written file is removed, as it is ours."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        with os.fdopen(fd, "wb") as out, open(tmp, "rb") as src:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        Path(path).unlink(missing_ok=True)
+        raise
+
+
 def _link_new(tmp: str, path: Path) -> None:
     """Give `tmp`'s content the name `path` unless a file has it already (FileExistsError). A hard link does
-    it in one step; where the file system has none, a look and a rename are the best there is."""
+    it in one step; where the file system has none (FAT, a network drive), a rename that refuses to
+    overwrite does it on Windows, and an exclusive create and a copy elsewhere."""
     try:
         os.link(tmp, path)
     except FileExistsError:
         raise
     except OSError:
-        if path.exists():
-            raise FileExistsError(f"{path} exists") from None
-        os.replace(tmp, path)
+        if os.name == "nt":
+            _rename_new(tmp, path)
+        else:
+            _create_new(tmp, path)
 
 
 def write_atomic(path: Path, data: bytes, *, exclusive: bool = False) -> None:
@@ -133,4 +157,7 @@ def write_atomic(path: Path, data: bytes, *, exclusive: bool = False) -> None:
         else:
             os.replace(tmp, path)
     finally:
-        Path(tmp).unlink(missing_ok=True)  # gone already after a replace; the link leaves it to go
+        try:
+            Path(tmp).unlink(missing_ok=True)  # gone already after a replace; the link leaves it to go
+        except OSError:
+            pass  # held (antivirus, an indexer) on Windows: the batch is published already, so say nothing

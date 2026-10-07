@@ -1,4 +1,5 @@
 """`abacus mint review` and `mint export`, and the Osmosis adapter (kit/07 s3, s4)."""
+import errno
 import json
 import re
 from fractions import Fraction
@@ -834,3 +835,63 @@ def test_cli_review_and_export_in_a_child_process(lib, capsys):
     code, out, err = cli(capsys, "mint", "export", BATCH, "--tags", "t", "--time", "120")
     assert code == 0, err
     assert json.loads(out)["result"]["questions"] == 4
+
+
+# --- the exclusive write where hard links are not available (FAT, network drives) ---
+
+def _no_links(monkeypatch):
+    """os.link fails as on a file system without hard links; os.replace overwrites, so it must stay unused."""
+    def nolink(src, dst, **kw):
+        raise OSError(errno.EPERM, "hard links are not supported")
+
+    def nope(src, dst):
+        raise AssertionError("the link fallback must not use os.replace: it overwrites")
+
+    monkeypatch.setattr(batchfile.os, "link", nolink)
+    monkeypatch.setattr(batchfile.os, "replace", nope)
+
+
+def test_exclusive_write_without_hard_links_publishes_a_new_file(tmp_path, monkeypatch):
+    _no_links(monkeypatch)
+    target = tmp_path / "b.jsonl"
+    batchfile.write_atomic(target, b"new\n", exclusive=True)
+    assert target.read_bytes() == b"new\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["b.jsonl"]  # no temp file left
+
+
+def test_exclusive_write_without_hard_links_never_overwrites(tmp_path, monkeypatch):
+    _no_links(monkeypatch)
+    target = tmp_path / "b.jsonl"
+    target.write_bytes(b"old\n")
+    with pytest.raises(FileExistsError):
+        batchfile.write_atomic(target, b"new\n", exclusive=True)
+    assert target.read_bytes() == b"old\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["b.jsonl"]  # no temp file left
+
+
+def test_the_posix_fallback_creates_the_target_exclusively(tmp_path):
+    """Where os.name is not "nt" the fallback is an O_EXCL create and a copy; it is the same on any host."""
+    src = tmp_path / "src.tmp"
+    src.write_bytes(b"new\n" * 1000)
+    target = tmp_path / "b.jsonl"
+    batchfile._create_new(str(src), target)
+    assert target.read_bytes() == b"new\n" * 1000
+    target.write_bytes(b"old\n")
+    with pytest.raises(FileExistsError):
+        batchfile._create_new(str(src), target)
+    assert target.read_bytes() == b"old\n"
+
+
+def test_a_temp_file_that_cannot_be_deleted_does_not_fail_a_published_write(tmp_path, monkeypatch):
+    """On Windows an antivirus scan can hold the temp file: the batch is already published by then."""
+    real = Path.unlink
+
+    def held(self, *a, **kw):
+        if self.name.endswith(".tmp"):
+            raise PermissionError(13, "the file is in use")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", held)
+    target = tmp_path / "b.jsonl"
+    batchfile.write_atomic(target, b"new\n")
+    assert target.read_bytes() == b"new\n"
