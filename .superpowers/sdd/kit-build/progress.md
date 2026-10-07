@@ -10,7 +10,7 @@
 |---|---|---|---|
 | T1 Foundation | [x] | f7555a4 c5833dd a4e8c1e; fixes in 93d40ce, 76ae73b | READY after 2 rounds (Sonnet) |
 | T2 Surfaces | [x] | 93d40ce c4e2f5b a030c95; fixes bf16f47, f92e19f | 2 rounds (Sonnet); round 2 (the thread-safe flush) has a deterministic test but no re-review: the cap was reached |
-| T3 Buttons: arithmetic and algebra | [~] round 1 fix fda71bc; hardening fixer running (a07f677d…); needs a final non-adversarial re-review | 8c6e573; fda71bc | Round 1 NOT READY (1 critical: parser string-eval hole). Re-review was cut short by a safety classifier before finishing; it found: `exact` returned Python objects via attribute access, `evidence._equal` sympified raw strings, identity `vars` unvalidated. All three went to the hardening fixer |
+| T3 Buttons: arithmetic and algebra | [x] | 8c6e573; fixes fda71bc, e7eb791 | READY after 2 rounds (Sonnet). Round 1: 1 critical (parser string-eval) + 3 important. A payload-hunting re-review was cut short by a safety classifier; the hardening round (e7eb791) added no-attribute-access, no sympify of strings in compare, validated identity vars. Final defensive re-review: READY |
 | T4 Buttons: counting and discrete math | [x] | a9790c2; fix 6697a1b | READY after 1 round (Sonnet). Round 1 had 3 important; the re-review confirmed all fixed |
 | T5 Buttons: probability and quant | [ ] | | |
 | T6 Buttons: continuous math | [ ] | | |
@@ -73,3 +73,4 @@ Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both
 - A test in tests/test_kit_algebra.py (test_exact_mod_of_a_huge_power_finishes_without_building_it) failed once during the T4 fixer's full run, while the T3 hardening fixer was mid-edit. Re-check when the hardening commit lands.
 - A safety classifier cut short a hostile-payload review of the parser. Don't re-run payload-hunting reviews; use defensive code review and ordinary tests.
 - T4 re-review minors (logged): `capped_at_k` is set even when the k-th counterexample was the last point; two child-process test assertions still accept "before any progress".
+- T3 final-review minors (logged): `Matrix` is in the parser whitelist but `exact` now rejects it (not a sp.Basic): allow sp.MatrixBase or drop Matrix; the mod fast path has no tests for 0**0, mod 1 and negative exponents (hand-checked right); **mint/make.py:121 still calls sympy.sympify on an answer string** (behind _costly + try/except): route it through parsing.parse_expr; `__x` is a legal identifier for identity `vars`.
