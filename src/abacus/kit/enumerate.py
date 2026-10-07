@@ -74,6 +74,8 @@ class Space:
     huge: bool = False                     # not sized because it is beyond 10^EXACT_LOG10, or too big to count
     fields: list[str] | None = None        # a product: the named variables; otherwise the object is `x`
     names: dict = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    huge_why: str = ""                     # why a huge space was not sized, when that is not plain largeness
 
 
 def intval(v: Any, what: str, env: dict) -> int:
@@ -101,6 +103,14 @@ def _items(spec: Any, what: str, env: dict):
     if n > MAX_ITEMS:
         raise BadInput(f"{what}: {n} items is more than the {MAX_ITEMS} an object can hold here")
     return range(n)
+
+
+def _repeat_notes(spec: Any, items) -> list[str]:
+    """Items that repeat are told apart by position, so equal items count as different objects."""
+    if isinstance(spec, list) and len({repr(v) for v in items}) < len(items):
+        return ["the items repeat, and objects are counted by position: equal items are treated as different, "
+                "so arrangements that look the same are counted separately"]
+    return []
 
 
 def _items_desc(spec: Any, items) -> str:
@@ -160,7 +170,8 @@ def _permutations(spec: Any, env: dict) -> Space:
     items = _items(spec, "permutations", env)
     n = len(items)
     size, huge = _sized(math.lgamma(n + 1) / LN10, lambda: math.factorial(n))
-    return Space(f"permutations of {_items_desc(spec, items)}", lambda: itertools.permutations(items), size, huge)
+    return Space(f"permutations of {_items_desc(spec, items)}", lambda: itertools.permutations(items), size, huge,
+                 notes=_repeat_notes(spec, items))
 
 
 def _combinations(spec: Any, env: dict) -> Space:
@@ -172,7 +183,7 @@ def _combinations(spec: Any, env: dict) -> Space:
     n = len(items)
     size, huge = _sized(_lg_comb(n, k), lambda: math.comb(n, k) if k <= n else 0)
     return Space(f"{k}-element combinations of {_items_desc(spec['of'], items)}",
-                 lambda: itertools.combinations(items, k), size, huge)
+                 lambda: itertools.combinations(items, k), size, huge, notes=_repeat_notes(spec["of"], items))
 
 
 def _subsets(spec: Any, env: dict) -> Space:
@@ -181,7 +192,7 @@ def _subsets(spec: Any, env: dict) -> Space:
     size, huge = _sized(n * math.log10(2), lambda: 2 ** n)
     return Space(f"subsets of {_items_desc(spec, items)}",
                  lambda: itertools.chain.from_iterable(itertools.combinations(items, r) for r in range(n + 1)),
-                 size, huge)
+                 size, huge, notes=_repeat_notes(spec, items))
 
 
 def _compositions_iter(n: int, k: int):
@@ -288,7 +299,7 @@ def _lattice(spec: Any, env: dict, ctx, deadline: float) -> Space:
     if w is None:
         raise BadInput("lattice_paths: the steps must all point forward along one direction, or a path could "
                        f"go on forever (steps {steps})")
-    ways = _lattice_ways(steps, w, target, deadline)
+    ways, why = _lattice_ways(steps, w, target, deadline)
     size = None if ways is None else ways.get((0, 0), 0)
     pot = lambda p: w[0] * p[0] + w[1] * p[1]  # noqa: E731
     tpot = pot(target)
@@ -326,12 +337,12 @@ def _lattice(spec: Any, env: dict, ctx, deadline: float) -> Space:
                 stack.append(0)
 
     return Space(f"lattice paths from (0, 0) to ({to[0]}, {to[1]}) with steps {[list(s) for s in steps]}",
-                 make, size, ways is None)
+                 make, size, ways is None, huge_why=why)
 
 
 def _lattice_ways(steps, w, target, deadline: float = math.inf):
     """Paths from each position to the target, over every position a path can pass through; None when
-    there are too many positions to hold, or counting them runs past ``deadline``."""
+    there are too many positions to hold, or counting them runs past ``deadline``; the second item says which."""
     pot = lambda p: w[0] * p[0] + w[1] * p[1]  # noqa: E731
     tpot = pot(target)
     forward_only = all(s[0] >= 0 and s[1] >= 0 for s in steps)
@@ -343,7 +354,7 @@ def _lattice_ways(steps, w, target, deadline: float = math.inf):
 
     seen, stack = {(0, 0)}, [(0, 0)]
     if not inside((0, 0)):
-        return {}
+        return {}, ""
     pops = 0
     while stack:
         pops += 1
@@ -353,12 +364,14 @@ def _lattice_ways(steps, w, target, deadline: float = math.inf):
             if q not in seen and inside(q):
                 seen.add(q)
                 stack.append(q)
-        if len(seen) > LATTICE_STATES or (pops & 1023 == 0 and time.monotonic() > deadline):
-            return None
+        if len(seen) > LATTICE_STATES:
+            return None, "states"
+        if pops & 1023 == 0 and time.monotonic() > deadline:
+            return None, "timeout"
     ways: dict = {}
     for p in sorted(seen, key=pot, reverse=True):
         ways[p] = 1 if p == target else sum(ways.get((p[0] + s[0], p[1] + s[1]), 0) for s in steps)
-    return ways
+    return ways, ""
 
 
 def _graphs(spec: Any, env: dict) -> Space:
@@ -611,6 +624,14 @@ def _run(inp: dict, ctx) -> Evidence:
     deadline = time.monotonic() + 0.4 * ctx.time_left()   # sizing the spaces must leave time to enumerate them
     spaces = [build(inp.get("space"), env, ctx, deadline) for env in envs]
     fields = spaces[0].fields
+    if sw_name is not None and fields is None:
+        if sw_name == "x":
+            raise BadInput("sweep: x is the name of the object in this space, so it cannot also be the sweep "
+                           "variable; use another name such as n")
+        for env, sp_ in zip(envs, spaces):
+            if sw_name in sp_.names and sp_.names[sw_name] != env[sw_name]:
+                raise BadInput(f"sweep: {sw_name} is also a name this space gives to where (it is the graph's "
+                               "own n), and the two differ; use another sweep name")
     names = list(fields) if fields is not None else ["x"]
     whole = fields is None
     where = D.UserFn(inp["where"], "where", names, whole) if inp.get("where") is not None else None
@@ -629,8 +650,17 @@ def _run(inp: dict, ctx) -> Evidence:
     ev = Evidence(button=NAME, result=None, method=METHOD, scope="x")
     # Is the space bigger than the budget can finish? Time a few hundred objects of the biggest case.
     if huge:
-        ev.flag("space_too_large", f"the space has more than 10^{EXACT_LOG10} objects (or too many to count), "
-                "far beyond any budget; the run goes ahead and returns what it reaches")
+        whys = {s.huge_why for s in spaces if s.huge and s.huge_why}
+        if whys == {"timeout"}:
+            ev.flag("space_too_large", "the size estimate timed out before the lattice paths could be counted, so "
+                    "the size is unknown (it may be very large); the run goes ahead and returns what it reaches")
+        elif whys == {"states"}:
+            ev.flag("space_too_large", f"the lattice has more than {LATTICE_STATES} positions, too many to size; "
+                    "the run goes ahead and returns what it reaches")
+        else:
+            ev.flag("space_too_large", f"the space has more than 10^{EXACT_LOG10} objects (or too many to count, "
+                    "or the size estimate timed out), far beyond any budget; the run goes ahead and returns what "
+                    "it reaches")
     elif total is not None and total > 0:
         k = max(range(len(spaces)), key=lambda i: sizes[i])
         rate = _rate(spaces[k], where, gb, {**envs[k], **spaces[k].names})
@@ -678,6 +708,12 @@ def _run(inp: dict, ctx) -> Evidence:
     ev.examples = st.examples
     if status == "error":
         ev.flag("bad_input", _error_message(err, spaces[st.idx], sw_name, sw_vals[st.idx]))
+    if status == "stopped" and not huge and any(z is None for z in sizes) and "space_too_large" not in             [f["code"] for f in ev.flags]:
+        ev.flag("space_too_large", "the size of the space was unknown (a generator has no size estimate), so this "
+                "could not be checked before the run; the budget stopped it, so the space is bigger than the "
+                "budget could cover")
+    for note in dict.fromkeys(n for s in spaces for n in s.notes):
+        ev.notes.append(note)
     if st.truncated:
         ev.notes.append(f"distribution truncated to the {MAX_KEYS} most common of its keys")
     if inp.get("proposed") is not None:

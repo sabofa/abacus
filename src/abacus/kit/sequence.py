@@ -28,6 +28,7 @@ MAX_DEGREE = 30          # polynomials above this degree are not offered
 MAX_ORDER = 40           # recurrences (and generating functions) above this order are not offered
 SHIFT_MAX = 8            # how far into a known sequence a list may start
 MIN_FIT = 2              # the holdout is lowered so that at least this many terms are fitted
+MIN_FIT_PREFERRED = 3    # from 4 terms on, at least this many are fitted
 MAX_RATIO_DEGREE = 3     # hypergeometric: a(n+1)/a(n) = P(n)/Q(n) with both degrees at most this
 
 DESCRIPTION = (
@@ -263,9 +264,11 @@ def _known_models(fit: list[Fraction], n_total: int, offset: int) -> list[Model]
     return out
 
 
-def _polynomial_model(fit: list[Fraction], offset: int) -> Model | None:
+def _polynomial_model(fit: list[Fraction], offset: int, capped: list[str] | None = None) -> Model | None:
     firsts = _differences(fit, MAX_DEGREE)
     if firsts is None:
+        if capped is not None:
+            capped.append(f"polynomial_degree<={MAX_DEGREE}")
         return None
     deg = max(len(firsts) - 1, 0)
     def expression():
@@ -285,8 +288,10 @@ def _polynomial_model(fit: list[Fraction], offset: int) -> Model | None:
     return Model("polynomial", expression, deg + 1, predict, {"degree": deg})
 
 
-def _recurrence_models(fit: list[Fraction], offset: int) -> list[Model]:
+def _recurrence_models(fit: list[Fraction], offset: int, capped: list[str] | None = None) -> list[Model]:
     bm = berlekamp_massey(fit, MAX_ORDER)
+    if bm is None and capped is not None:
+        capped.append(f"recurrence<={MAX_ORDER}")
     if bm is None or bm[1] == 0:
         return []
     C, L = bm
@@ -444,26 +449,38 @@ def _run(inp: dict, ctx) -> Evidence:
                       scope=f"stopped at the time budget while computing f(n): {N} terms (n = {offset}..{offset + N - 1}) "
                             "were computed and nothing was fitted")
         return ev
-    eff = min(h_req, max(0, N - MIN_FIT))
+    # Never hold back more than half the terms, and from 4 terms on keep at least 3 to fit.
+    eff = min(h_req, N // 2, max(0, N - MIN_FIT))
+    if N >= MIN_FIT_PREFERRED + 1:
+        eff = min(eff, N - MIN_FIT_PREFERRED)
     F = N - eff
     fit, held = terms[:F], terms[F:]
     notes = []
     if eff < h_req:
-        notes.append(f"holdout lowered from {h_req} to {eff}: {N} terms leave at least {MIN_FIT} to fit"
+        notes.append(f"holdout lowered from {h_req} to {eff}: with {N} terms, at most half are held back and "
+                     f"{F} are left to fit"
                      if eff else f"holdout lowered from {h_req} to 0: {N} terms are too few to keep any back")
+    if eff and (eff < 3 or F < 4):
+        notes.append(f"thin evidence: fitted on {F} terms and tested on {eff}; a guess that survives has little "
+                     "behind it, so give more terms to test it properly")
 
     steps: list[tuple[str, Callable[[], list[Model]]]] = [
         ("known sequences", lambda: _known_models(fit, N, offset)),
-        ("polynomial", lambda: [m for m in [_polynomial_model(fit, offset)] if m]),
-        ("recurrence", lambda: _recurrence_models(fit, offset)),
+        ("polynomial", lambda: [m for m in [_polynomial_model(fit, offset, capped)] if m]),
+        ("recurrence", lambda: _recurrence_models(fit, offset, capped)),
         ("hypergeometric", lambda: [m for m in [_hypergeometric_model(fit, offset)] if m]),
     ]
     refuted, vacuous = 0, 0
     kept: list[dict] = []
+    capped: list[str] = []
 
     def result() -> dict:
         res = {"candidates": list(kept), "terms": N, "offset": offset, "fit_terms": F, "holdout": eff,
                "holdout_requested": h_req, "refuted": refuted}
+        if not eff:
+            res["unlisted_unsupported"] = vacuous
+        if capped:
+            res["capped"] = list(dict.fromkeys(capped))
         return res
 
     span = f"{N} terms (n = {offset}..{offset + N - 1})"
@@ -511,6 +528,10 @@ def _run(inp: dict, ctx) -> Evidence:
             ev.notes.append(f"{vacuous} form(s) that would need every term to pin down were not listed: "
                             "without held-out terms any list fits them")
     ev.notes.extend(notes)
+    if capped:
+        ev.notes.append("search stopped at its limits, which is not the same as finding no structure: "
+                        + "; ".join(dict.fromkeys(capped)) + " (a polynomial of higher degree or a recurrence of "
+                        "higher order than these was not looked for)")
     if refuted:
         ev.notes.append(f"{refuted} guess(es) fitted the first {F} terms but missed a held-out term, and are dropped")
     if get_config().network:

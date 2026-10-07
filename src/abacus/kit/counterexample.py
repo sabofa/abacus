@@ -163,8 +163,10 @@ class Search:
         self.margin = margin.call if margin else None
         self.k = k
         self.checked = 0
-        self.errored = 0
-        self.first_error: tuple[BaseException, tuple] | None = None
+        self.errored = 0                   # points where the claim (or the margin, when it is the claim) could not be evaluated
+        self.margin_errors = 0             # points where the margin raised but a claim was given and still evaluated
+        self.first_error: tuple[BaseException, tuple, str] | None = None
+        self.first_margin_error: tuple[BaseException, tuple] | None = None
         self.found: list[tuple] = []
         self.closest: list[tuple] = []     # sorted (margin, order, point)
 
@@ -176,6 +178,7 @@ class Search:
                      "errored": self.errored}
         if self.margin is not None:
             res["closest"] = [{"point": self.point(p), "margin": m} for m, _, p in self.closest]
+            res["margin_errors"] = self.margin_errors
         return res
 
     def scan(self, points, pacer: D.Pacer) -> str:
@@ -198,15 +201,20 @@ class Search:
                         if m != m:
                             raise ValueError("the margin is nan")
                     except ARITH as e:
-                        self._error(e, p)
-                        continue
+                        if claim is None:      # the margin is the claim: nothing to evaluate at this point
+                            self._error(e, p, "margin")
+                            continue
+                        self.margin_errors += 1    # the claim is still evaluated; the point just has no margin
+                        if self.first_margin_error is None:
+                            self.first_margin_error = (e, p)
+                        m = None
                     except Exception as e:  # noqa: BLE001
                         self.checked = base + n
                         raise _UserError("margin", p, e) from None
                 try:
                     ok = bool(claim(*p)) if claim is not None else m >= 0
                 except ARITH as e:
-                    self._error(e, p)
+                    self._error(e, p, "claim")
                     continue
                 except Exception as e:  # noqa: BLE001
                     self.checked = base + n
@@ -223,10 +231,10 @@ class Search:
             self.checked = base + n
         return "done"
 
-    def _error(self, e: BaseException, p: tuple) -> None:
+    def _error(self, e: BaseException, p: tuple, role: str) -> None:
         self.errored += 1
         if self.first_error is None:
-            self.first_error = (e, p)
+            self.first_error = (e, p, role)
 
 
 def _random_points(vars: list[Var], rng: AbacusRNG, count: int, corners: list[tuple], ctr: list):
@@ -335,10 +343,18 @@ def _run(inp: dict, ctx) -> Evidence:
                   complete=status in ("done", "found"), seed=seed, examples=[s.point(p) for p in s.found])
     if status == "error":
         ev.flag("bad_input", _error_message(err, names))
+    if status == "found":
+        ev.result["capped_at_k"] = True
     if s.errored:
-        e, p = s.first_error
-        ev.flag("claim_error", f"the claim could not be evaluated at {s.errored} point(s), which are not counted as "
+        e, p, role = s.first_error
+        what = "the claim" if role == "claim" else "the margin (the claim, since no claim was given)"
+        ev.flag("claim_error", f"{what} could not be evaluated at {s.errored} point(s), which are not counted as "
                 f"counterexamples; the first was {D.short(s.point(p), 60)}: {type(e).__name__}: {e}")
+    if s.margin_errors:
+        e, p = s.first_margin_error
+        ev.flag("margin_error", f"the margin raised at {s.margin_errors} point(s); the claim was still evaluated "
+                f"there, but those points have no margin and are missing from closest; the first was "
+                f"{D.short(s.point(p), 60)}: {type(e).__name__}: {e}")
     ev.notes.extend(notes)
     return ev
 

@@ -259,8 +259,9 @@ def test_budget_stopped_big_enumeration_in_a_child_process():
     assert ev.complete is False and ev.scope.strip()
     assert ev.budget["time_s"] < 15
     assert ev.method == "exhaustive"
-    if "before any progress" not in ev.scope:  # a starved child can be killed before its first partial
-        assert ev.result["count"] > 0 and "space_too_large" in flags(ev) and "stopped" in ev.scope
+    # a starved child can be killed before its first partial; it then says so, and that is the only way out
+    assert "before any progress" in ev.scope or "stopped before any progress" in ev.scope or (
+        ev.result["count"] > 0 and "space_too_large" in flags(ev) and "stopped" in ev.scope), ev.scope
     no_verdict_keys(ev)
 
 
@@ -360,9 +361,10 @@ def test_zero_holdout_candidates_are_marked_unsupported():
 
 def test_a_holdout_larger_than_the_list_is_lowered_and_says_so():
     ev = ak.sequence(terms=[1, 4, 9, 16], holdout=9)
-    assert ev.result["holdout"] == 2 and ev.result["holdout_requested"] == 9
+    assert ev.result["holdout"] == 1 and ev.result["holdout_requested"] == 9 and ev.result["fit_terms"] == 3
     assert any("holdout" in n and "lowered" in n for n in ev.notes)
-    assert ev.result["candidates"] == [] and ev.complete
+    ev = ak.sequence(terms=[1, 4], holdout=9)
+    assert ev.result["holdout"] == 0 and any("too few" in n for n in ev.notes) and ev.complete
 
 
 def test_nothing_fits_random_terms_and_the_scope_says_what_was_tried():
@@ -524,7 +526,11 @@ def test_both_mode_samples_when_the_finite_domain_is_too_big():
     ev = run("counterexample", dict(claim="n != 123456789012", domain={"n": [1, 10**15]}, mode="both", seed=1,
                                     samples=5000), time_s=3)
     assert ev.method == "sampled" and ev.result["checked"] > 0
-    assert ev.complete in (True, False) and ev.scope.strip()
+    # the exhaustive pass takes up to half the time, then hands over to 5000 random points and the 2 corners
+    assert ev.complete and "gave way to sampling" in ev.scope and "seed 1" in ev.scope
+    assert "5000 random points sampled" in ev.scope and "2 corner points" in ev.scope
+    first = int(ev.scope.split("the first ")[1].split(" ")[0])
+    assert first > 0 and ev.result["checked"] == first + 5000 + 2
 
 
 def test_exhaustive_needs_a_finite_domain():
@@ -538,8 +544,8 @@ def test_a_stopped_counterexample_search_says_how_far_it_got():
     assert ev.result["checked"] > 1000 and "stopped" in ev.scope
     ev = budget.call("counterexample", dict(claim="n >= 0", domain={"n": [0, 10**12]}, mode="exhaustive"), time_s=2)
     assert ev.complete is False and ev.scope.strip()
-    if "before any progress" not in ev.scope:
-        assert ev.result["checked"] > 0 and "stopped" in ev.scope
+    assert "before any progress" in ev.scope or "stopped before any progress" in ev.scope or (
+        ev.result["checked"] > 0 and "stopped" in ev.scope), ev.scope
     no_verdict_keys(ev)
 
 
@@ -596,3 +602,117 @@ def test_sequence_with_no_structure_is_fast_and_lists_nothing():
     rnd = random.Random(1)
     ev = ak.sequence(terms=[rnd.randint(1, 10**10) for _ in range(400)])
     assert ev.result["candidates"] == [] and ev.complete and ev.budget["time_s"] < 8
+
+
+# ------------------------------------------------------------------------------------------------ T4 review round 1
+
+def test_a_margin_error_does_not_hide_the_claim():
+    ev = ak.counterexample(claim="x != 0", margin="1/x", domain={"x": [-2, 2]}, mode="exhaustive")
+    assert ev.result["counterexamples"] == [{"x": 0}]
+    assert ev.result["margin_errors"] == 1 and ev.result["errored"] == 0 and ev.result["checked"] == 5
+    assert ev.complete is True
+    flag = next(f for f in ev.flags if f["code"] == "margin_error")
+    assert "margin" in flag["message"] and "claim was still evaluated" in flag["message"]
+    assert "claim_error" not in flags(ev)
+    # the points that had a margin still feed closest
+    assert {c["point"]["x"] for c in ev.result["closest"]} <= {-2, -1, 1, 2}
+
+
+def test_a_margin_alone_that_errors_names_the_margin_not_the_claim():
+    ev = ak.counterexample(margin="1/x", domain={"x": [-1, 1]}, mode="exhaustive")
+    assert ev.result["errored"] == 1 and ev.result["margin_errors"] == 0
+    msg = next(f["message"] for f in ev.flags if f["code"] == "claim_error")
+    assert "margin" in msg and "no claim was given" in msg
+
+
+def test_a_result_truncated_by_k_says_so():
+    ev = ak.counterexample(claim="n < 5", domain={"n": [0, 99]}, mode="exhaustive", k=3)
+    assert ev.result["capped_at_k"] is True and len(ev.result["counterexamples"]) == 3
+    assert "capped_at_k" not in ak.counterexample(claim="n < 500", domain={"n": [0, 99]}, mode="exhaustive").result
+
+
+def order_41_terms(count):
+    a = list(range(1, 42))                      # a(n) = a(n-1) + a(n-41), a genuine order-41 recurrence
+    while len(a) < count:
+        a.append(a[-1] + a[-41])
+    return a
+
+
+def test_a_search_stopped_by_its_caps_says_so():
+    ev = ak.sequence(terms=order_41_terms(200))
+    assert ev.result["candidates"] == [] and ev.complete
+    assert "recurrence<=40" in ev.result["capped"]
+    assert any("limits" in n and "recurrence<=40" in n for n in ev.notes)
+    plain = ak.sequence(terms=[1, 1, 2, 5, 14, 42, 132])
+    assert "capped" not in plain.result and not any("limits" in n for n in plain.notes)
+
+
+def test_a_polynomial_above_the_degree_cap_says_so():
+    ev = ak.sequence(terms=[n ** 35 for n in range(60)])
+    assert "polynomial_degree<=30" in ev.result["capped"]
+
+
+def test_five_squares_are_found_with_a_lowered_holdout_and_thin_evidence_is_noted():
+    ev = ak.sequence(terms=[1, 4, 9, 16, 25])
+    assert ev.result["holdout"] == 2 and ev.result["fit_terms"] == 3 and ev.result["holdout_requested"] == 3
+    poly = candidates(ev, "polynomial")
+    assert poly and poly[0]["held_out"] == 2 and poly[0]["held_out_tested"] == 2
+    assert any("holdout lowered from 3 to 2" in n for n in ev.notes)
+    assert any("thin evidence" in n for n in ev.notes)
+    # a long list is untouched
+    long = ak.sequence(terms=[n * n for n in range(20)])
+    assert long.result["holdout"] == 3 and not any("thin evidence" in n or "lowered" in n for n in long.notes)
+
+
+def test_candidates_pinned_by_every_term_are_counted_not_listed():
+    ev = ak.sequence(terms=[1, 1, 2, 5, 14, 42, 132], holdout=0)
+    assert ev.result["unlisted_unsupported"] >= 1
+    assert not candidates(ev, "polynomial")          # degree 6 on 7 terms: any 7 numbers fit it
+    assert any("not listed" in n for n in ev.notes)
+    assert "unlisted_unsupported" not in ak.sequence(terms=[1, 1, 2, 5, 14, 42, 132]).result
+
+
+def test_a_code_space_that_hit_the_budget_is_flagged_after_the_fact():
+    code = "def space():\n    n = 0\n    while True:\n        yield n\n        n += 1"
+    ev = run("enumerate", {"space": {"code": code}, "where": "x % 3 == 0"}, time_s=1)
+    assert ev.complete is False
+    msg = next(f["message"] for f in ev.flags if f["code"] == "space_too_large")
+    assert "unknown" in msg
+    done = ak.enumerate(space={"code": "def space():\n    yield from range(5)"})
+    assert "space_too_large" not in flags(done) and done.complete
+
+
+def test_a_lattice_sizing_timeout_is_not_called_more_than_10_to_300(monkeypatch):
+    from abacus.kit import enumerate as _w  # noqa: F401  (the wrapper; the module is below)
+    import sys
+    mod = sys.modules["abacus.kit.enumerate"]
+    real = mod._lattice_ways
+    monkeypatch.setattr(mod, "_lattice_ways", lambda steps, w, target, deadline=0: (None, "timeout"))
+    ev = ak.enumerate(space={"lattice_paths": {"to": [3, 3]}}, where="True")
+    msg = next(f["message"] for f in ev.flags if f["code"] == "space_too_large")
+    assert "timed out" in msg and "10^300" not in msg
+    monkeypatch.setattr(mod, "_lattice_ways", real)
+
+
+def test_repeated_items_are_counted_by_position_and_say_so():
+    ev = ak.enumerate(space={"combinations": {"of": [1, 1, 2], "k": 2}})
+    assert ev.result["count"] == 3 and any("by position" in n for n in ev.notes)
+    assert any("by position" in n for n in ak.enumerate(space={"permutations": [1, 1, 2]}).notes)
+    assert not any("by position" in n for n in ak.enumerate(space={"permutations": [1, 2, 3]}).notes)
+
+
+def test_sweep_x_on_a_non_product_space_is_bad_input():
+    ev = ak.enumerate(space={"permutations": "x"}, sweep={"x": [1, 4]})
+    assert "bad_input" in flags(ev) and ev.complete is False and "sweep" in ev.flags[0]["message"]
+    ok = ak.enumerate(space={"permutations": "n"}, where="x[0] == 0", sweep={"n": [1, 4]})
+    assert ok.result["counts"] == [1, 1, 2, 6]
+    bad = ak.enumerate(space={"graphs": {"n": "n + 1"}}, where="n > 1", sweep={"n": [1, 2]})
+    assert "bad_input" in flags(bad)
+
+
+def test_a_slow_where_checks_the_clock_after_the_first_object():
+    slow = "sum(range(10**6)) >= 0"                       # tens of milliseconds an object
+    ev = run("enumerate", {"space": {"product": {"a": [1, 10**6]}}, "where": slow}, time_s=0.5)
+    assert ev.complete is False and ev.result["objects_checked"] < 64
+    ev = run("counterexample", dict(claim=slow, domain={"n": [0, 10**12]}, mode="exhaustive"), time_s=0.5)
+    assert ev.complete is False and ev.result["checked"] < 64

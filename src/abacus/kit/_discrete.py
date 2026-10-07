@@ -183,13 +183,13 @@ class Pacer:
 
     def __init__(self, ctx, partial: Callable[[], dict], *, reserve: float = 0.05, every: float = 0.2):
         self.ctx, self.partial, self.reserve, self.every = ctx, partial, reserve, every
-        self.next = 64
+        self.next = 1      # the first time check comes after one object, so a slow callback cannot overshoot
         self._n = 0
         self._t = self._report = time.monotonic()
 
     def reset(self) -> None:
         """A new count starts (n restarts from 0)."""
-        self.next, self._n, self._t = 64, 0, time.monotonic()
+        self.next, self._n, self._t = 1, 0, time.monotonic()
 
     def check(self, n: int) -> bool:
         now = time.monotonic()
