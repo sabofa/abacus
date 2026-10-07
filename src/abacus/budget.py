@@ -125,7 +125,7 @@ def call(name: str, inp: dict, *, time_s=None, mem_mb=None, in_process=False, fu
                 try:
                     kind, data = parent.recv()
                 except EOFError:
-                    ev = _err(name, "the child process died without a result")
+                    ev = _err(name, "the child process died without a result", last)
                     break
                 if kind == "ready":
                     ready = True

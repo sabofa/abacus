@@ -44,6 +44,12 @@ def test_cooperative_stop_wins_race():
     assert ev.budget["stopped"] is False and ev.complete is False
 
 
+def test_grace_window_lets_a_late_button_deliver():
+    ev = budget.call("t_polite_late", {}, time_s=1)
+    assert ev.result == "mine-late" and ev.scope == "stopped myself late"
+    assert ev.budget["stopped"] is False
+
+
 def test_time_s_validation():
     for bad in (0, -1, float("nan"), float("inf")):
         assert "bad_input" in codes(budget.call("t_schema", {"n": 1}, time_s=bad, in_process=True))

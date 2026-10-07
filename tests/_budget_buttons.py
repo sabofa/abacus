@@ -54,3 +54,11 @@ def t_polite(inp, ctx):
 def t_raise_after(inp, ctx):
     ctx.progress({"result": 3, "scope": "got to 3", "method": "search"})
     raise ValueError("late")
+
+
+@_reg("t_polite_late", description="stops itself past the deadline", input_schema=_ANY)
+def t_polite_late(inp, ctx):
+    while time.monotonic() < ctx.deadline + 0.1:
+        time.sleep(0.02)
+    return Evidence(button="t_polite_late", result="mine-late", method="timed",
+                    scope="stopped myself late", complete=False)
