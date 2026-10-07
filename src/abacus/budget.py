@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import math
 import multiprocessing as mp
+import os
 import secrets
 import sys
 import time
@@ -49,8 +50,23 @@ def _grace(limit: float) -> float:
     return max(0.25, min(2.0, 0.1 * limit))
 
 
+def _flush_std() -> None:
+    """Flush what the role printed (a partial line stays buffered) before the parent can kill the child."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _child(name: str, module: str, inp: dict, seed, limit: float, mem_mb: int, conn) -> None:
     try:
+        # fd 1 is the parent's stdout (the CLI's JSON, the MCP stream) and a spawned child inherits it, so
+        # anything the role prints would land in the parent's output. Send it to stderr instead, at the fd
+        # level (C code, subprocesses) and at the Python level. sandbox._execute's redirect_stdout nests
+        # inside this, so the `run` button still captures its own stdout.
+        os.dup2(2, 1)
+        sys.stdout = sys.stderr
         if sys.platform != "win32":
             import resource
             cap = mem_mb * 1024 * 1024
@@ -62,8 +78,11 @@ def _child(name: str, module: str, inp: dict, seed, limit: float, mem_mb: int, c
         b = registry.get(name)
         conn.send(("ready", None))
         ctx = Ctx(seed, time.monotonic() + limit, lambda p: conn.send(("progress", jsonable(p))))
-        conn.send(("done", b.fn(inp, ctx).to_dict(full=True)))
+        result = b.fn(inp, ctx).to_dict(full=True)
+        _flush_std()  # the parent may terminate this process the moment it has the result
+        conn.send(("done", result))
     except BaseException as e:  # noqa: BLE001
+        _flush_std()
         conn.send(("error", f"{type(e).__name__}: {e}"))
     finally:
         conn.close()
@@ -166,6 +185,8 @@ def call(name: str, inp: dict, *, time_s=None, mem_mb=None, in_process=False, fu
     if name == "algo_run":
         # Every role run goes through here (run_role, the CLI's `abacus algo_run`, the MCP tool), so this
         # is the one place a run is recorded in usage.jsonl (kit/06 s4). Imported late: roles imports budget.
-        from .algo.roles import record_usage
-        record_usage(inp.get("path"), inp.get("role"), ev, time.monotonic() - t_call)
+        # A run that never started (startup_timeout) did not use the algorithm, so it is not recorded.
+        if not any(f.get("code") == "startup_timeout" for f in ev.flags):
+            from .algo.roles import record_usage
+            record_usage(inp.get("path"), inp.get("role"), ev, time.monotonic() - t_call)
     return ev

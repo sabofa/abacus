@@ -347,6 +347,36 @@ def test_a_stale_lock_from_a_dead_process_is_broken(lib, monkeypatch):
     assert [r["target"] for r in links.list_links()] == [T1, T2] and not lock.exists()
 
 
+def test_a_waiter_that_saw_a_stale_lock_does_not_break_a_fresh_one(lib, monkeypatch):
+    """Two waiters see the same stale lock; the first breaks it and takes a fresh one; the second must not
+    break that. Simulated: the lock on disk is fresh, but this waiter's staleness check is told it is old."""
+    import time
+    from abacus.library import _jsonl
+
+    links.add("a.one", T1, "minted")
+    lock = lib / "links.jsonl.lock"
+    lock.write_text("held")  # the first waiter's fresh lock
+    real_time, real_monotonic, real_sleep = time.time, time.monotonic, time.sleep
+
+    class Clock:
+        calls = 0
+        monotonic = staticmethod(real_monotonic)
+        sleep = staticmethod(real_sleep)
+
+        @classmethod
+        def time(cls):
+            cls.calls += 1
+            return real_time() + (3600 if cls.calls == 1 else 0)  # only the first look sees it as stale
+
+    monkeypatch.setattr(_jsonl, "time", Clock)
+    monkeypatch.setattr(_jsonl, "LOCK_TIMEOUT_S", 0.3)
+    with pytest.raises(TimeoutError):  # the lock is the other waiter's, so this one must wait, not take it
+        links.add("a.one", T2, "minted")
+    assert lock.read_text() == "held"  # still there, still theirs
+    assert [r["target"] for r in links.list_links()] == [T1]
+    assert sorted(x.name for x in lib.iterdir()) == ["links.jsonl", "links.jsonl.lock"]  # no .stale left behind
+
+
 def test_rm_retries_a_replace_that_windows_refuses(lib, monkeypatch):
     links.add("a.one", T1, "minted")
     links.add("a.one", T2, "minted")

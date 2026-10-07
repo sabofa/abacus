@@ -338,6 +338,13 @@ def test_a_run_that_never_started_records_nothing(lib):
     assert rows(lib) == []
 
 
+def test_a_child_that_never_started_records_no_usage(lib, monkeypatch):
+    monkeypatch.setattr(budget, "STARTUP_S", 0.01)  # the child cannot report ready in time
+    ev = run_role(lib / "nt" / "power-mod.py", "compute", args=PARAMS)
+    assert [f["code"] for f in ev.flags] == ["startup_timeout"]
+    assert rows(lib) == [] and usage.counts() == {}
+
+
 def test_a_usage_failure_never_fails_the_run(lib, monkeypatch):
     def boom(*a, **k):
         raise OSError("disk full")

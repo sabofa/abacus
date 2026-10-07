@@ -206,3 +206,23 @@ def test_algo_run_keeps_stdout_clean_when_the_file_prints_at_import(tmp_path):
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["result"] == 42  # stdout is the JSON and nothing else
     assert "hello from import" in r.stderr
+
+
+@pytest.mark.parametrize("body, printed", [
+    ("print('hello from compute')", "hello from compute"),
+    ("sys.stdout.write('x-no-newline')", "x-no-newline"),  # glued onto the JSON if it reached fd 1
+    ("os.write(1, b'raw fd one write')", "raw fd one write"),  # a C-level / subprocess style write
+])
+def test_algo_run_keeps_stdout_clean_when_a_role_prints_while_it_runs(tmp_path, body, printed):
+    lib = tmp_path / "lib"
+    (lib / "zz").mkdir(parents=True)
+    f = lib / "zz" / "chatty_run.py"
+    meta = {"id": "zz.chatty_run", "title": "Chatty run", "summary": "Prints while it runs.",
+            "roles": ["compute"], "answer": {"format": "integer"}}
+    f.write_text(f"import os\nimport sys\n\nMETA = {meta!r}\n\n\ndef compute(params):\n    {body}\n    return 42\n",
+                 encoding="utf-8")
+    r = subprocess.run([sys.executable, "-m", "abacus", "algo", "run", str(f), "compute"],
+                       capture_output=True, text=True, timeout=120, env=_env(lib))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["result"] == 42  # stdout is the JSON and nothing else
+    assert printed in r.stderr

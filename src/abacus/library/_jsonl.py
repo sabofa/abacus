@@ -38,6 +38,26 @@ def read_rows(path: Path) -> list[dict]:
     return [row for row in map(parse_line, text.split("\n")) if row is not None]
 
 
+def _break_stale(lock: Path) -> None:
+    """Break a lock this waiter saw to be stale. Several waiters may have seen the same one, and a plain
+    unlink by the slower of them would delete the fresh lock the faster one has taken since. So the lock is
+    renamed to a name of our own first (only one rename can win), and what we hold is checked again:
+    if it is fresh it was not the stale one, and it is put back."""
+    mine = f"{lock}.{os.getpid()}.stale"
+    try:
+        os.replace(lock, mine)
+    except OSError:
+        return  # another waiter broke it first, or it is being released: the caller retries O_EXCL
+    try:
+        if time.time() - os.stat(mine).st_mtime <= LOCK_STALE_S:
+            os.link(mine, lock)  # fails if a lock exists again, which is then the right one to keep
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(mine)
+
+
 @contextlib.contextmanager
 def file_lock(path: Path):
     """Hold an exclusive lock on `path` while the block runs, for writers that read then replace it.
@@ -57,7 +77,7 @@ def file_lock(path: Path):
         except (FileExistsError, PermissionError):  # Windows says "permission" for a lock being deleted
             try:
                 if time.time() - lock.stat().st_mtime > LOCK_STALE_S:
-                    lock.unlink(missing_ok=True)
+                    _break_stale(lock)
                     continue
             except OSError:
                 pass  # gone since we looked, or not ours to touch: the deadline decides
