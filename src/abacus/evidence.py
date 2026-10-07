@@ -51,11 +51,33 @@ def jsonable(x: Any) -> Any:
     return str(x)
 
 
+def _normal_form(x: Any) -> Any:
+    """A hashable, order-aware shape for comparing containers of different types: tuple, list and ndarray
+    become a tuple, set and frozenset a frozenset, a dict maps its keys to normal forms, and numpy scalars
+    become Python scalars. Anything else is returned as it is."""
+    if isinstance(x, np.ndarray):
+        x = x.tolist()
+    elif isinstance(x, np.generic):
+        return x.item()
+    if isinstance(x, (tuple, list)):
+        return tuple(_normal_form(i) for i in x)
+    if isinstance(x, (set, frozenset)):
+        return frozenset(_normal_form(i) for i in x)
+    if isinstance(x, dict):
+        return {k: _normal_form(v) for k, v in x.items()}
+    return x
+
+
 def _equal(a: Any, b: Any) -> bool:
     try:
         if bool(a == b):  # plain equality first: sympify turns two equal sets into a Complement, never 0
             return True
     except Exception:  # noqa: BLE001  (an array's == has no single truth value)
+        pass
+    try:
+        if bool(_normal_form(a) == _normal_form(b)):  # (1, 2) and [1, 2], or an array and a list
+            return True
+    except Exception:  # noqa: BLE001  (an unhashable element in a set, say)
         pass
     try:
         sa, sb = sp.sympify(a), sp.sympify(b)

@@ -93,7 +93,7 @@ def lint(path, *, k: int = DEFAULT_K, time_s: float | None = None) -> Evidence:
                       scope=scope)
         for name in CHECKS:
             if checks[name]["status"] == "problem":
-                ev.flag(name, _msg(checks[name]["detail"]))
+                ev.flag(name.replace(" ", "_"), _msg(checks[name]["detail"]))
         return ev
 
     def skip_rest(why: str) -> None:

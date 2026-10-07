@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from abacus.algo import surface  # noqa: F401  (registers the algo_lint button the budget tests call)
 from abacus.algo.lint import CHECKS, lint
 
 FIX = Path(__file__).parent / "fixtures" / "algos"
@@ -178,11 +179,20 @@ def test_a_real_non_integer_and_a_real_out_of_range_still_report(tmp_path):
 def test_each_problem_is_mirrored_into_a_flag_named_for_its_check():
     ev = lint(FIX / "lint_range.py", k=3)
     flags = flags_by_code(ev)
-    assert set(flags) == {c["check"] for c in ev.result["checks"] if c["status"] == "problem"}
+    assert set(flags) == {c["check"].replace(" ", "_") for c in ev.result["checks"] if c["status"] == "problem"}
     assert "range" in flags and "outside" in flags["range"]
     ev = lint(FIX / "lint_syntax_error.py")
     assert flags_by_code(ev)["header"].startswith("SyntaxError")
     assert lint(FIX / "nt_power_mod.py", k=3).flags == []
+
+
+def test_flag_codes_are_snake_case_while_check_names_keep_their_spaces():
+    ev = lint(FIX / "lint_missing_role.py", k=2)
+    assert by_name(ev)["roles exist"]["status"] == "problem"  # the check name in the result is unchanged
+    codes = [f["code"] for f in ev.flags]
+    assert "roles_exist" in codes and "roles exist" not in codes
+    assert all(" " not in c for c in codes)
+    assert "check" in flags_by_code(ev)["roles_exist"]
 
 
 def test_import_time_exit_is_a_header_problem_not_a_crash(tmp_path):
@@ -217,8 +227,11 @@ def test_deadline_is_checked_before_each_role_call_in_the_later_passes():
     ev = lint(FIX / "lint_slow_gen.py", k=3, time_s=1.1)
     c = by_name(ev)
     assert ev.complete is False
-    if c["determinism"]["status"] == "skipped":
-        assert "time budget" in c["determinism"]["detail"]
+    # Holds at any machine speed: generate sleeps at least 0.3 s a call, so the deadline of 1.1 s has always
+    # passed by the second determinism check (0.9 s of generate + 0.3 s of the first re-run), and a slower
+    # machine only moves the cut earlier, into generate, which also leaves determinism skipped.
+    assert c["determinism"]["status"] == "skipped"
+    assert "time budget" in c["determinism"]["detail"]
     assert c["agreement"]["status"] == "skipped"
     assert ev.result["total_seconds"] < 2.5
 

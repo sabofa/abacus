@@ -80,6 +80,30 @@ def test_compare_containers_equal_by_plain_equality():
     assert make_compare([1, 2], [1])["equal"] is False
 
 
+def test_compare_mixed_container_types_by_normal_form():
+    assert make_compare((1, 2), [1, 2])["equal"] is True
+    assert make_compare([1, 2], (1, 2))["equal"] is True
+    assert make_compare(([1, 2], {3}), [(1, 2), frozenset({3})])["equal"] is True
+    assert make_compare({"a": (1, 2)}, {"a": [1, 2]})["equal"] is True
+    assert make_compare(np.array([1, 2, 3]), [1, 2, 3])["equal"] is True
+    assert make_compare([1, 2, 3], np.array([1, 2, 3]))["equal"] is True
+    assert make_compare(np.array([[1, 2], [3, 4]]), [[1, 2], [3, 4]])["equal"] is True
+    assert make_compare((np.int64(1), np.float64(2.5)), [1, 2.5])["equal"] is True
+    assert make_compare({1, 2}, frozenset({2, 1}))["equal"] is True
+    assert make_compare([{1, 2}, 3], [frozenset({1, 2}), 3])["equal"] is True
+
+
+def test_compare_mixed_container_types_stay_unequal_when_the_contents_differ():
+    assert make_compare([1, 2], [2, 1])["equal"] is False
+    assert make_compare((1, 2), [2, 1])["equal"] is False
+    assert make_compare((1, 2), [1, 2, 3])["equal"] is False
+    assert make_compare(np.array([1, 2]), [2, 1])["equal"] is False
+    assert make_compare({"a": (1, 2)}, {"a": [1, 3]})["equal"] is False
+    assert make_compare({"a": 1}, {"b": 1})["equal"] is False
+    assert make_compare({1, 2}, frozenset({1, 3}))["equal"] is False
+    assert make_compare([{1, 2}], [{1, 3}])["equal"] is False
+
+
 def test_validation():
     with pytest.raises(ValueError):
         ev(scope="")
