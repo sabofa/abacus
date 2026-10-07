@@ -11,6 +11,7 @@ import math
 import re
 import warnings
 
+import mpmath as _mp
 import numpy as np
 import sympy as sp
 from scipy import optimize
@@ -25,6 +26,8 @@ BIG = 1e100
 FEAS = 1e-6              # constraint violation allowed in a reported point
 ACTIVE = 1e-6            # distance to a bound / constraint that counts as "on it"
 NEAR_KEEP = 10
+NEAR_GAP = 1e3          # a local result more than this many times (1 + |best|) worse than the best is not "near"
+CROSS_RUNS = 3          # differential-evolution runs that cross-check a multistart which found several local optima
 MAX_GRID = 40_000
 _OPS = re.compile(r"<=|>=|==|=|<|>")
 
@@ -291,6 +294,17 @@ class Found:
         self.pts: list[tuple[float, np.ndarray]] = []    # (g, x) feasible local results
         self.starts = 0
         self.infeasible = 0
+        self.at_infinity: list[str] = []   # unbounded variables along which the best point can be pushed for free
+        self.dropped = 0                   # local results too far from the best to be called near-optimal
+
+    def check_infinity(self) -> bool:
+        """True once the best point so far can be pushed toward infinity at no loss: the optimum is then an infimum
+        (or supremum) that is approached and not attained, and more searching cannot improve on it."""
+        if not self.pts:
+            return False
+        g, x = min(self.pts, key=lambda t: t[0])
+        self.at_infinity = _infinity_probe(self.P, x, g)
+        return bool(self.at_infinity)
 
     def add(self, x) -> None:
         if x is None:
@@ -312,6 +326,30 @@ class Found:
             else:
                 out.append([g, x, 1])
         return out
+
+
+def _distinct_optima(found: Found) -> int:
+    """How many local optima with distinct values the search has found (equal values are ties, not alternatives)."""
+    cl = found.clusters()
+    if not cl:
+        return 0
+    vals = []
+    for g, _x, _h in cl:
+        if abs(g - cl[0][0]) > NEAR_GAP * (1 + abs(cl[0][0])):
+            continue   # an unconverged run, not a local optimum
+        if all(abs(g - v) > 1e-4 * (1 + abs(v)) for v in vals):
+            vals.append(g)
+    return len(vals)
+
+
+def _spread(found: Found) -> float:
+    """The largest difference between the values of the (reasonably close) local optima found."""
+    cl = found.clusters()
+    if len(cl) < 2:
+        return 0.0
+    best = cl[0][0]
+    close = [abs(g - best) for g, _x, _h in cl if abs(g - best) <= NEAR_GAP * (1 + abs(best))]
+    return max(close) if close else 0.0
 
 
 def _pool_order(P: Problem, rng, n: int):
@@ -339,6 +377,8 @@ def _multistart(P, rng, ctx, starts, found: Found, report):
         found.starts += 1
         found.add(_local(P, pts[i]))
         report()
+        if found.check_infinity():
+            return False
     return False
 
 
@@ -379,11 +419,11 @@ def _evolution(P, rng, ctx, runs, found: Found, report):
         x = np.asarray(res.x, dtype=float)
         polished = _local(P, x)
         found.add(polished if polished is not None else x)
-        if polished is not None:
-            found.add(x)
         report()
         if stop:
             return True
+        if found.check_infinity():
+            return False
     return False
 
 
@@ -418,8 +458,7 @@ def _grid(P: Problem, ctx, total, found: Found, report):
     for x in seeds:
         found.starts += 1
         loc = _local(P, x)
-        found.add(loc if loc is not None else x)
-        found.add(x)
+        found.add(loc if loc is not None else x)   # the polished point only: the raw grid seed is not a result
         report()
         if ctx.time_left() <= 0:
             return True
@@ -477,11 +516,13 @@ def _result_from(P: Problem, found: Found):
         return None, [], []
     best_g, best_x, best_hits = cl[0]
     best = _entry(P, best_x, best_g, None, best_hits)
-    near = [_entry(P, x, g, best_g, hits) for g, x, hits in cl[1:1 + NEAR_KEEP]]
+    close = [c for c in cl[1:] if abs(c[0] - best_g) <= NEAR_GAP * (1 + abs(best_g))]
+    found.dropped = len(cl) - 1 - len(close)
+    near = [_entry(P, x, g, best_g, hits) for g, x, hits in close[:NEAR_KEEP]]
     return best, near, cl
 
 
-def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_scope, seed, notes0):
+def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_scope, seed, notes0, multimodal=0.0):
     best, near, cl = _result_from(P, found)
     notes = list(notes0)
     flags = []
@@ -515,6 +556,15 @@ def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_
         notes.append(f"f or a constraint was undefined (division by zero, a square root of a negative ...) at "
                      f"{P.undefined} of {P.evals} evaluations; those points were skipped, so a bound at which "
                      f"f is singular is never reported as the optimum")
+    if found.dropped:
+        notes.append(f"{found.dropped} local result(s) more than {NEAR_GAP:g} times (1 + |best|) worse than the best "
+                     f"were left out of near_optimal: they are unconverged runs, not near-optimal points")
+    if multimodal:
+        flags.append(("multimodal", f"several distinct local optima were found (values differ by up to "
+                                    f"{_mp.nstr(multimodal, 3)}): the global optimum may be another one. Numeric search "
+                                    f"finds candidates, not proofs"))
+        notes.append("the function has several local optima; a differential-evolution run cross-checked the "
+                     "multistart, but neither proves that the best value found is the global optimum")
     notes.append("numeric search finds candidates, not proofs: the best point is the best one seen, and a better "
                  "one may lie where no start landed. near_optimal lists the other distinct local optima found (ties "
                  "show equality cases and symmetry)")
@@ -688,6 +738,18 @@ def _lagrange(inp, ctx, names, lo, hi, lo_e, hi_e, f_expr, cons, sign):
                                           f"inequality inactive or active)"]
 
 
+def _lagrange_infinity(names, lo, hi, f_expr, cons, sign, best):
+    """Unbounded variables along which the best critical point can be bettered or matched far out (a numeric probe)."""
+    if not (np.any(np.isinf(lo)) or np.any(np.isinf(hi))):
+        return []
+    P = _build(names, lo, hi, None, cons, sign, f_expr=f_expr)
+    x = np.array(best["x"], dtype=float)
+    g0 = P.g(x)
+    if g0 >= BIG:
+        return []
+    return _infinity_probe(P, x, g0)
+
+
 def _run_lagrange(inp, ctx, names, lo, hi, lo_e, hi_e, f_expr, cons, sign):
     cands, complete, notes = _lagrange(inp, ctx, names, lo, hi, lo_e, hi_e, f_expr, cons, sign)
     goal = inp.get("goal", "min")
@@ -708,10 +770,20 @@ def _run_lagrange(inp, ctx, names, lo, hi, lo_e, hi_e, f_expr, cons, sign):
         return e
 
     flags = []
+    unbounded = False
     if ordered:
         best = ordered[0]
         result = {"goal": goal, "best": entry(best), "near_optimal": [entry(c, best["value"]) for c in ordered[1:1 + NEAR_KEEP]],
                   "candidates_examined": len(ordered)}
+        far = _lagrange_infinity(names, lo, hi, f_expr, cons, sign, best)
+        if far:
+            unbounded = True
+            flags.append(("optimum_at_infinity", f"moving {', '.join(far)} far toward infinity is as good as the best "
+                                                 f"critical point, so f is unbounded in that direction (or has a "
+                                                 f"better infimum there): the critical points listed are local, not "
+                                                 f"the optimum"))
+            notes.append("an unbounded variable can be pushed far away at no loss from the best critical point: the "
+                         "value reported is not the global optimum (there may be none)")
         on_b = best["kind"] != "interior critical point"
         result["on_boundary"] = on_b
         result["active"] = [] if not on_b else [best["kind"]]
@@ -737,7 +809,7 @@ def _run_lagrange(inp, ctx, names, lo, hi, lo_e, hi_e, f_expr, cons, sign):
     scope = (f"symbolic Lagrange / KKT enumeration by sympy for the {goal}imum of f over {len(names)} variable(s): "
              f"critical points of f on each face of the bounds and each active-inequality case; exact for the "
              f"cases sympy solved")
-    ev = Evidence(button=NAME, result=result, method="symbolic", scope=scope, complete=complete,
+    ev = Evidence(button=NAME, result=result, method="symbolic", scope=scope, complete=complete and not unbounded,
                   precision={"exact": True, "note": "exact values and points (sympy); floats are 30-digit evaluations"},
                   notes=notes)
     for code, msg in flags:
@@ -814,6 +886,8 @@ def _run(inp: dict, ctx) -> Evidence:
                       "scope": f"{found.starts} search(es) run so far; numeric search, candidates not proofs"})
 
     starts = inp.get("starts")
+    auto = method == "auto"
+    multimodal = 0.0
     if method == "auto":
         method = "evolution" if P.d > 6 else "multistart"
     if method == "grid":
@@ -854,13 +928,19 @@ def _run(inp: dict, ctx) -> Evidence:
         if not found.pts and not stopped and P.d >= 1 and inp.get("method", "auto") == "auto":
             methods.append("evolution")
             stopped = _evolution(P, rng, ctx, 3, found, report)
+        elif auto and not stopped and not found.at_infinity and _distinct_optima(found) > 1:
+            # Several local optima: the multistart may have missed the global one, so differential evolution
+            # (global by design) is run as a cross-check, and its points join the pool.
+            methods.append("evolution")
+            stopped = _evolution(P, rng, ctx, CROSS_RUNS, found, report)
+            multimodal = _spread(found)
     else:
         n = int(starts or 4)
         methods.append("evolution")
         stopped = _evolution(P, rng, ctx, n, found, report)
         if P.d > 6 and inp.get("method", "auto") == "auto":
             notes0.append("more than 6 variables: differential evolution was used instead of multistart")
-    return _finish_numeric(inp, P, found, ctx, methods, stopped, extra, seed, notes0)
+    return _finish_numeric(inp, P, found, ctx, methods, stopped, extra, seed, notes0, multimodal)
 
 
 def _expand(xr, names, kept, subs):

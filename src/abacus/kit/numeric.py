@@ -6,6 +6,7 @@ between two independent computations), never a proof.
 """
 from __future__ import annotations
 
+import math
 import re
 
 import mpmath as mp
@@ -65,6 +66,15 @@ _SCHEMA = {
 
 class _Bad(ValueError):
     pass
+
+
+class _Fail(Exception):
+    """The computation cannot honestly give a value (a divergent sum, an integral with no limit): the button reports
+    no value, an incomplete result and this flag."""
+
+    def __init__(self, code: str, message: str, scope: str = "", notes=None):
+        super().__init__(message)
+        self.code, self.message, self.scope, self.notes = code, message, scope, list(notes or [])
 
 
 def _list(v):
@@ -157,6 +167,37 @@ class _Out:
         self.scope, self.notes, self.flags, self.extra = scope, notes or [], flags or [], extra or {}
 
 
+def _alt_points(a, b):
+    """A different split of an infinite range (a second, independent run of the quadrature)."""
+    if a == -mp.inf and b == mp.inf:
+        return [a, -1, 0, 1, b]
+    if b == mp.inf:
+        return [a, a + 1, a + 10, b]
+    if a == -mp.inf:
+        return [a, b - 10, b - 1, b]
+    return [a, b]
+
+
+def _finite_scale(f, a, b) -> mp.mpf:
+    """The largest |f| on a sample of the finite part of the range (10 units next to the finite end)."""
+    if a == -mp.inf and b == mp.inf:
+        lo, hi = mp.mpf(-10), mp.mpf(10)
+    elif b == mp.inf:
+        lo, hi = a, a + 10
+    elif a == -mp.inf:
+        lo, hi = b - 10, b
+    else:
+        lo, hi = a, b
+    best = mp.mpf(0)
+    for k in range(1, 40):
+        x = lo + (hi - lo) * k / 40
+        try:
+            best = max(best, abs(f.f(x)))
+        except (ZeroDivisionError, ValueError, ArithmeticError):
+            continue
+    return best
+
+
 def _op_integral(inp, ctx, digits):
     _need(inp, "expr", "var", "lo", "hi")
     v = _name(inp["var"])
@@ -166,70 +207,235 @@ def _op_integral(inp, ctx, digits):
     a, b = _real(inp["lo"], "lo", True), _real(inp["hi"], "hi", True)
     infinite = a in (mp.inf, -mp.inf) or b in (mp.inf, -mp.inf)
     deg = 6 + digits // 40
-    val, err = mp.quad(f, [a, b], error=True, maxdegree=deg)
     notes = []
+    # Tanh-sinh evaluates the midpoint of a symmetric range; an integrand undefined there (sin(x)/x at 0, a removable
+    # singularity) would be rejected, so a range that contains 0 is split at 0 and its pieces never touch it.
+    pts = [a, 0, b] if a < 0 < b else [a, b]
+    try:
+        val, err = mp.quad(f, pts, error=True, maxdegree=deg)
+    except ZeroDivisionError:
+        if infinite or len(pts) > 2:
+            raise
+        mid = (a + b) / 2
+        pts = [a, mid, b]
+        val, err = mp.quad(f, pts, error=True, maxdegree=deg)
+        notes.append(f"the integrand is undefined at the midpoint {mp.nstr(mid, 8)} of the range (a removable "
+                     f"singularity?), so the range was split there; if it is a true pole the integral diverges and "
+                     f"the error estimate will be large")
+    if a < 0 < b and len(pts) == 3 and pts[1] == 0:
+        notes.append("the range contains 0 and was split there, so an integrand that is undefined only at 0 "
+                     "(a removable singularity such as sin(x)/x) is integrated through it")
     if err > abs(val) * mp.mpf(10) ** -digits and err > mp.mpf(10) ** -digits:
         # Not obviously converged: rerun with a finer rule; the two answers must agree, and their difference
         # counts toward the error (a divergent integral changes a lot between the runs).
-        val2, err2 = mp.quad(f, [a, b], error=True, maxdegree=deg + 3)
+        val2, err2 = mp.quad(f, pts, error=True, maxdegree=deg + 3)
         err = max(err2, abs(val2 - val))
         val = val2
     if infinite:
-        notes.append("an infinite range is mapped to a finite one by mpmath's tanh-sinh scheme; the error is an "
-                     "estimate, not a bound")
+        # mpmath's own error estimate is absolute and can be tiny next to a huge, meaningless value (1 against 1e44),
+        # so an infinite range is always computed a second time on a different split and degree, and the two must
+        # agree. A value enormous next to the integrand on the finite part is a divergent integral, not an answer.
+        val2, err2 = mp.quad(f, _alt_points(a, b), error=True, maxdegree=deg + 1)
+        err = max(err, err2, abs(val - val2))
+        if err2 < err and abs(val - val2) <= err2:
+            val = val2
+        scale = _finite_scale(f, a, b) or mp.mpf(1)
+        if abs(val) > mp.mpf(10) ** 8 * scale or abs(val2) > mp.mpf(10) ** 8 * scale:
+            raise _Fail("no_convergence",
+                        f"the integral over [{inp['lo']}, {inp['hi']}] has no value this method can reach: the result "
+                        f"({mp.nstr(val, 3)}) is enormous next to the integrand on the finite part (up to "
+                        f"{mp.nstr(scale, 3)}), the sign of a divergent integral or one with no limit "
+                        f"(oscillating without decay, such as sin x on [0, oo))",
+                        f"mpmath tanh-sinh quadrature of {inp['expr']} over [{inp['lo']}, {inp['hi']}] ran twice on "
+                        f"different splits and gave no usable value; nothing is reported",
+                        ["two runs of the quadrature (different splits) were compared; mpmath's own estimate "
+                         "(absolute, about 1) was not trusted next to a value this large",
+                         "an oscillating integrand that does not decay has no limit; one that decays only through "
+                         "oscillation (cos(x**2), sin(x)/x) converges but is out of reach of this quadrature"])
+        notes.append("an infinite range is mapped to a finite one by mpmath's tanh-sinh scheme and computed twice on "
+                     "different splits; the error is the larger of mpmath's estimate and the disagreement of the two "
+                     "runs, an estimate and not a bound")
     scope = (f"mpmath tanh-sinh quadrature of {inp['expr']} over [{inp['lo']}, {inp['hi']}] at {digits + GUARD} "
              f"working digits ({f.calls} evaluations)")
     return _Out([val], [err], scope=scope, notes=notes)
 
 
-def _inf_sum(f, lo, hi, digits, ctx, product=False):
-    """(value, error estimate, notes, flags) of an infinite sum or product, checked a second way."""
+SCALES = (10 ** 3, 10 ** 6, 10 ** 9)
+P_DIVERGENT = 1.02      # terms ~ n^-p with p at or below this: the series diverges (or is at best conditionally convergent)
+P_CONVERGENT = 1.08     # ... and above this it converges absolutely; in between, it cannot be told
+
+
+def _term_sizes(g, start, product):
+    """For each scale S, (S, max |term| over four consecutive indices near start+S, whether their signs alternate).
+    A product's 'term' is the factor minus 1. A scale where g cannot be evaluated is skipped."""
+    rows = []
+    for S in SCALES:
+        vals = []
+        try:
+            for j in range(4):
+                t = g(mp.mpf(start + S + j))
+                vals.append(t - 1 if product else t)
+        except (ZeroDivisionError, ValueError, OverflowError, ArithmeticError, TypeError):
+            continue
+        mags = [abs(t) for t in vals]
+        alt = all(not isinstance(t, mp.mpc) and t != 0 for t in vals) and all(
+            vals[i] * vals[i + 1] < 0 for i in range(3))
+        rows.append((S, max(mags), alt))
+    return rows
+
+
+def _check_terms(g, start, product, name, text):
+    """Raise _Fail unless the terms of an infinite sum (factors of a product) clearly head to zero (one) fast enough
+    for the series to converge. Returns (decay rate p in n^-p, whether the signs alternate)."""
+    what = "factors" if product else "terms"
+    rows = _term_sizes(g, start, product)
+    got = {S: (a, alt) for S, a, alt in rows}
+    if 10 ** 6 not in got or 10 ** 9 not in got:
+        raise _Fail("no_convergence",
+                    f"the {what} of the {name} could not be evaluated far enough out (n = 10^6 and 10^9) to check "
+                    f"that it converges, so no value is reported",
+                    f"infinite {name} of {text}: convergence could not be checked; nothing is reported")
+    a3 = got.get(10 ** 3, (None, False))[0]
+    a6, alt6 = got[10 ** 6]
+    a9, alt9 = got[10 ** 9]
+    sizes = ", ".join(f"{mp.nstr(a, 3)} at n=10^{int(round(math.log10(S)))}" for S, a, _ in rows)
+    scope0 = f"infinite {name} of {text}: the {what} were checked first and did not allow a value; nothing is reported"
+    if a9 == 0 and a6 == 0:
+        return mp.inf, False
+    if a9 >= a6 * mp.mpf("0.999") or a9 > mp.mpf("0.01"):
+        raise _Fail("divergent",
+                    f"the {what} of the {name} do not tend to {'1' if product else 'zero'} (size {sizes}), so it "
+                    f"diverges or has no limit (it oscillates or grows); no value is reported",
+                    scope0, [f"size of the {what}{' minus 1' if product else ''}: {sizes}"])
+    alt = alt6 and alt9
+    p = mp.log(a6 / a9) / mp.log(1000) if a9 != 0 else mp.inf
+    if alt:
+        if a9 < mp.mpf("1e-4") and a9 < a6 and (a3 is None or a6 < a3):
+            return p, True
+        raise _Fail("no_convergence",
+                    f"the {what} alternate in sign but shrink too slowly (size {sizes}) for the alternating-series "
+                    f"test; convergence cannot be confirmed, so no value is reported",
+                    scope0, [f"size of the {what}: {sizes}"])
+    if p <= P_DIVERGENT:
+        raise _Fail("divergent",
+                    f"the {what} of the {name} shrink no faster than 1/n (size {sizes}, decay rate about n^-"
+                    f"{mp.nstr(p, 3)}), the borderline of divergence: the series diverges, or at best converges "
+                    f"only conditionally, which this method cannot confirm; no value is reported",
+                    scope0, [f"size of the {what}: {sizes}; a series needs {what} shrinking faster than 1/n"])
+    if p < P_CONVERGENT:
+        raise _Fail("no_convergence",
+                    f"the {what} of the {name} shrink almost as slowly as 1/n (size {sizes}, decay rate about n^-"
+                    f"{mp.nstr(p, 3)}), so convergence cannot be told from divergence by a numeric test; no value "
+                    f"is reported",
+                    scope0, [f"size of the {what}: {sizes}"])
+    return p, False
+
+
+def _tail_em(g, start, N, p):
+    """(value, error) of sum_{k>=start} g(k): the first N-start terms directly, the rest by Euler-Maclaurin with the tail
+    integral computed after the substitution x = N t^-m. A slowly decaying integrand (x^-1.1) loses real mass beyond
+    the point where mpmath's own tanh-sinh scheme stops (about 1e40), which this substitution removes."""
+    head = mp.fsum(g(mp.mpf(k)) for k in range(start, N))
+    m = min(mp.mpf(30), max(mp.mpf(1), 1 / (p - 1)))
+    integral = mp.quad(lambda t: g(N * t ** (-m)) * N * m * t ** (-m - 1), [0, 1])
+    tail, err = mp.sumem(g, [N, mp.inf], integral=integral, error=True)
+    return head + tail, err
+
+
+def _slow_sum(g, start, p, digits):
+    """A slowly convergent, non-alternating series (terms ~ n^-p, p small): two Euler-Maclaurin sums that start the
+    tail at different points must agree. The default extrapolation is not used: it is unreliable here."""
+    try:
+        v1, e1 = _tail_em(g, start, start + 20, p)
+        v2, e2 = _tail_em(g, start, start + 40, p)
+    except (NoConv, ValueError, ZeroDivisionError, ArithmeticError):
+        v1 = v2 = None
+    if v1 is None or isinstance(v1, mp.mpc) or isinstance(v2, mp.mpc) or not _agree(v1, v2, 6):
+        gap = f"; the two sums were {mp.nstr(v1, 10)} and {mp.nstr(v2, 10)}" if v1 is not None else ""
+        raise _Fail("no_convergence",
+                    f"the series converges slowly (terms ~ n^-{mp.nstr(p, 3)}) and two Euler-Maclaurin sums did not "
+                    f"agree{gap}; no value is reported",
+                    "infinite sum: a slowly convergent series whose Euler-Maclaurin sums disagree; nothing is reported",
+                    ["the default extrapolation (Richardson/Shanks) is unreliable on a series this slow and was not used"])
+    err = max(abs(v1 - v2), e1, e2)
+    return v2, err, [f"the series converges slowly (terms ~ n^-{mp.nstr(p, 3)}): the value is an Euler-Maclaurin sum "
+                     f"whose tail starts at two different terms (differing by {mp.nstr(abs(v1 - v2), 3)}); the "
+                     f"default extrapolation is unreliable here and was not used"],         [("slow_convergence", "the series converges slowly; its sum is an Euler-Maclaurin estimate")]
+
+
+def _inf_sum(f, lo, hi, digits, ctx, product=False, text=""):
+    """(value, error estimate, notes, flags) of an infinite sum or product, checked several ways. Raises _Fail when
+    the series does not clearly converge or the checks do not agree."""
     run = mp.nprod if product else mp.nsum
     comb = (lambda a, b: a * b) if product else (lambda a, b: a + b)
     direct = mp.fprod if product else mp.fsum
+    name = "product" if product else "sum"
     notes, flags = [], []
     if hi == mp.inf and lo != -mp.inf:
         g, start = f, lo
     elif lo == -mp.inf and hi != mp.inf:
         g, start = (lambda k: f(-k)), -hi
     else:   # both infinite: split at 0
-        left = _inf_sum(lambda k: f(-k), 1, mp.inf, digits, ctx, product)
-        right = _inf_sum(f, 0, mp.inf, digits, ctx, product)
+        left = _inf_sum(lambda k: f(-k), 1, mp.inf, digits, ctx, product, text)
+        right = _inf_sum(f, 0, mp.inf, digits, ctx, product, text)
         return comb(left[0], right[0]), left[1] + right[1], left[2] + right[2], left[3] + right[3]
     start = int(start)
+    # 1. The terms must head to zero, and fast enough. Extrapolation applied to a divergent series returns a
+    #    confident number (sum 1/n gives 6.7, sum 1 gives 450, sum 2^n gives -1), so this comes first.
+    p, alt = _check_terms(g, start, product, name, text)
+    if not product and not alt and p < 1 + (digits + 5) / 40:
+        return _slow_sum(g, start, p, digits)
     plain = run(g, [start, mp.inf])
     head = direct(g(mp.mpf(k)) for k in range(start, start + SHIFT))
     shifted = comb(head, run(g, [start + SHIFT, mp.inf]))
-    if _agree(plain, shifted, digits):
-        return plain, abs(plain - shifted), notes, flags
+    plain_ok = _agree(plain, shifted, digits)
     if product:
-        flags.append(("slow_convergence", "the product and its shifted copy disagree"))
-        notes.append("the infinite product did not converge cleanly: starting it later gave a different value, "
-                     "so the error estimate (that difference) is large")
+        if not plain_ok:
+            flags.append(("slow_convergence", "the product and its shifted copy disagree"))
+            notes.append("the infinite product did not converge cleanly: starting it later gave a different value, "
+                         "so the error estimate (that difference) is large")
         return plain, abs(plain - shifted), notes, flags
-    # The default extrapolation (Richardson / Shanks) is unreliable on a slowly convergent series. Euler-Maclaurin
-    # is tried as a second opinion; it is trusted only where it agrees with one of the first two runs.
-    try:
-        em = mp.nsum(g, [start, mp.inf], method="euler-maclaurin")
-    except (NoConv, ValueError, ZeroDivisionError):
-        em = None
     d_plain = f"two runs of the default extrapolation (Richardson/Shanks) differed by {mp.nstr(abs(plain - shifted), 3)}"
-    if em is not None:
-        for other in (plain, shifted):
-            if _agree(em, other, digits):
-                flags.append(("slow_convergence", "the default extrapolation was unsteady"))
-                notes.append(f"the series converges slowly: {d_plain}; Euler-Maclaurin agrees with one of them, "
-                             f"so that value is used")
-                return em, abs(em - other), notes, flags
-    flags.append(("slow_convergence", "the series converges too slowly for the extrapolations to agree"))
-    notes.append(f"the series converges slowly (or not at all): {d_plain}"
-                 + (f", and Euler-Maclaurin gave {mp.nstr(em, 8)}, which agrees with neither" if em is not None else "")
-                 + ". The extrapolations do not converge, so the value is unreliable; check that the series "
-                   "converges, or sum more terms directly")
-    err = abs(plain - shifted)
-    if em is not None:
-        err = max(err, abs(em - plain), abs(em - shifted))
-    return (em if em is not None else plain), err, notes, flags
+    if alt:
+        if not plain_ok:
+            raise _Fail("no_convergence",
+                        f"the alternating series did not extrapolate steadily ({d_plain}); no value is reported",
+                        f"infinite sum of {text}: extrapolation did not settle; nothing is reported", [d_plain])
+        notes.append("the terms alternate in sign and shrink to zero, so the series converges (alternating-series "
+                     "test); the value is extrapolated and agrees with a run that starts later")
+        return plain, abs(plain - shifted), notes, flags
+    # 2. A second method. Euler-Maclaurin sums the head and integrates the tail; started at `start` and at
+    #    `start+SHIFT` the two must agree with each other. The default extrapolation (Richardson / Shanks) is
+    #    unreliable on a slowly convergent series, so it is cross-checked whenever the decay is slower than n^-4.
+    em = em_shift = None
+    if not plain_ok or p < 4:
+        try:
+            em = mp.nsum(g, [start, mp.inf], method="euler-maclaurin")
+            em_shift = comb(head, mp.nsum(g, [start + SHIFT, mp.inf], method="euler-maclaurin"))
+        except (NoConv, ValueError, ZeroDivisionError, ArithmeticError):
+            em = em_shift = None
+    em_gap = abs(em - em_shift) if em is not None else None
+    em_ok = em is not None and not isinstance(em, mp.mpc) and _agree(em, em_shift, 6)
+    if plain_ok and (em is None or (em_ok and _agree(plain, em, min(digits, 6)))):
+        err = abs(plain - shifted)
+        if em_ok:
+            err = max(err, abs(plain - em), em_gap)
+        if em is None and p < 4:
+            flags.append(("slow_convergence", "the series converges slowly and the cross-check could not run"))
+            notes.append(f"the series converges slowly (terms ~ n^-{mp.nstr(p, 3)}) and Euler-Maclaurin, the "
+                         f"cross-check, did not run; only the default extrapolation and its shifted copy agree")
+        return plain, err, notes, flags
+    if em_ok and not plain_ok:
+        flags.append(("slow_convergence", "the default extrapolation was unsteady"))
+        notes.append(f"the series converges slowly (terms ~ n^-{mp.nstr(p, 3)}): {d_plain}; Euler-Maclaurin started "
+                     f"at two points agrees with itself to within {mp.nstr(em_gap, 3)}, so it is used")
+        return em, em_gap, notes, flags
+    detail = (f"{d_plain}; Euler-Maclaurin at two start points gave {mp.nstr(em, 8)} and {mp.nstr(em_shift, 8)}"
+              if em is not None else f"{d_plain}; Euler-Maclaurin did not converge")
+    raise _Fail("no_convergence",
+                f"the series' terms shrink (about n^-{mp.nstr(p, 3)}) but the value could not be pinned down: "
+                f"{detail}; the checks do not agree, so no value is reported",
+                f"infinite sum of {text}: the independent checks disagree; nothing is reported", [detail])
 
 
 def _op_series(inp, ctx, digits, product):
@@ -251,7 +457,7 @@ def _op_series(inp, ctx, digits, product):
                            f"{digits + GUARD} working digits"])
     if lo == mp.inf or hi == -mp.inf:
         raise _Bad("lo must be below hi")
-    val, err, notes, flags = _inf_sum(f, lo, hi, digits, ctx, product)
+    val, err, notes, flags = _inf_sum(f, lo, hi, digits, ctx, product, inp['expr'])
     notes.append(f"an infinite {name} is approximated by extrapolation, so the error is an estimate (the "
                  f"disagreement between two runs), not a bound")
     scope = (f"mpmath {'nprod' if product else 'nsum'} of {inp['expr']} for {v} = {inp['lo']}..{inp['hi']}, "
@@ -320,13 +526,23 @@ def _op_root(inp, ctx, digits):
         raise _Bad("the variable names must differ")
     if len(exprs) != len(names):
         raise _Bad(f"{len(exprs)} equation(s) need {len(exprs)} variable(s), but var lists {len(names)}")
-    fs = [_Fn(_expr(_equation(s) if isinstance(s, str) else s, names), names, ctx) for s in exprs]
+    sym = [_expr(_equation(s) if isinstance(s, str) else s, names) for s in exprs]
+    fs = [_Fn(e, names, ctx) for e in sym]
     x0 = _list(inp["x0"])
     dps = digits + GUARD
+    notes, flags = [], []
     if len(fs) == 1:
         if len(x0) not in (1, 2):
             raise _Bad("x0 is a start value, or a bracket [a, b] for one equation")
         start = [_real(s, "x0") for s in x0]
+        if len(start) == 2:
+            fa, fb = fs[0](start[0]), fs[0](start[1])
+            if fa * fb > 0:
+                flags.append(("no_sign_change", f"f has the same sign at both ends of the bracket "
+                                                f"[{mp.nstr(start[0], 8)}, {mp.nstr(start[1], 8)}]: a root there is "
+                                                f"not guaranteed, and the search may leave the bracket"))
+                notes.append("the bracket does not contain a sign change, so it does not bracket a root; any root "
+                             "found is a root of f but may lie outside it")
         kw = {"solver": "anderson"} if len(start) == 2 else {}
         arg = tuple(start) if len(start) == 2 else start[0]
         solve = lambda: mp.findroot(fs[0], arg, **kw)  # noqa: E731
@@ -340,21 +556,67 @@ def _op_root(inp, ctx, digits):
         solve = lambda: mp.findroot(F, start)  # noqa: E731
         resid = lambda r: [abs(t) for t in F(*r)]  # noqa: E731
         as_list = lambda r: list(r)  # noqa: E731
+    scope_method = ('secant' if len(fs) == 1 and len(start) == 1 else 'anderson bracketing' if len(fs) == 1
+                    else 'multidimensional Newton')
+    multiple = 0
     try:
         r1 = as_list(solve())
         residual = max(resid(r1[0] if len(fs) == 1 else r1))
         with mp.workdps(dps + 15):
             r2 = as_list(solve())
     except ValueError as exc:
-        if "Could not find root" in str(exc) or "tolerance" in str(exc) or "bracket" in str(exc).lower():
+        if not ("Could not find root" in str(exc) or "tolerance" in str(exc) or "bracket" in str(exc).lower()):
+            raise
+        if len(fs) != 1:
             raise NoConv(str(exc)) from None
-        raise
+        # A multiple root (x-1)**2 makes f flat where it vanishes, so the residual test fails. Look for it as a
+        # simple root of a derivative of f, then confirm that f itself vanishes there.
+        got = _multiple_root(sym[0], names[0], fs[0], start, digits, dps, ctx)
+        if got is None:
+            raise NoConv(str(exc)) from None
+        r1, r2, residual, multiple = got
+        scope_method = f"secant on the derivative of order {multiple}"
     errs = [abs(a - b) for a, b in zip(r1, r2)]
-    notes = ["root finding reports one root near the start; others may exist. The error is the difference between "
-             "two runs at different working precision, and `residual` is |f(root)|"]
-    scope = (f"mpmath findroot ({'secant' if len(fs) == 1 and len(start) == 1 else 'anderson bracketing' if len(fs) == 1 else 'multidimensional Newton'}) "
+    if len(fs) == 1 and len(start) == 2:
+        lo_b, hi_b = min(start), max(start)
+        if not lo_b <= r1[0] <= hi_b:
+            flags.append(("root_outside_bracket", f"the root found ({mp.nstr(r1[0], 12)}) lies outside the bracket "
+                                                  f"[{mp.nstr(lo_b, 8)}, {mp.nstr(hi_b, 8)}]"))
+    notes.append("root finding reports one root near the start; others may exist. The error is the difference between "
+                 "two runs at different working precision, and `residual` is |f(root)|")
+    if multiple:
+        flags.append(("multiple_root", f"f and its derivative of order {multiple} both vanish here: a multiple root "
+                                       f"(multiplicity at least {multiple + 1}); the root was found as a simple root "
+                                       f"of that derivative, and a root of even multiplicity is a touch, not a "
+                                       f"crossing, so a bracket test cannot see it"))
+        notes.append("f is flat at a multiple root, so the direct search cannot converge on it; the error estimate "
+                     "is for the derivative's root, which is the same point")
+    scope = (f"mpmath findroot ({scope_method}) "
              f"for {', '.join(str(s) for s in exprs)} from {inp['x0']} at {dps} working digits, repeated at {dps + 15}")
-    return _Out(r1, errs, scalar=len(fs) == 1, scope=scope, notes=notes, extra={"residual": mp.nstr(residual, 3)})
+    return _Out(r1, errs, scalar=len(fs) == 1, scope=scope, notes=notes, flags=flags,
+                extra={"residual": mp.nstr(residual, 3)})
+
+
+def _multiple_root(expr, var, f, start, digits, dps, ctx):
+    """([root], [root at higher precision], |f(root)|, order of the derivative) for a multiple root of one equation, or
+    None. Tries the first few derivatives; accepts a root of f^(m) at which f itself vanishes to the target digits."""
+    sym = sp.Symbol(var)
+    tiny = mp.mpf(10) ** -digits
+    for m in range(1, 5):
+        d = _Fn(sp.diff(expr, sym, m), [var], ctx)
+        arg = tuple(start) if len(start) == 2 else start[0]
+        kw = {"solver": "anderson"} if len(start) == 2 else {}
+        try:
+            r1 = mp.findroot(d, arg, **kw)
+            res = abs(f(r1))
+            if res > tiny:
+                continue
+            with mp.workdps(dps + 15):
+                r2 = mp.findroot(d, arg, **kw)
+            return [r1], [r2], res, m
+        except (ValueError, ZeroDivisionError, ArithmeticError):
+            continue
+    return None
 
 
 def _op_ode(inp, ctx, digits):
@@ -456,6 +718,13 @@ def numeric(inp: dict, ctx) -> Evidence:
             return C.budget_stop(ev, "no value was reached")
         except _Bad as e:
             return alg.bad_input(NAME, str(e))
+        except _Fail as e:
+            ev = Evidence(button=NAME, result=None, method="numeric",
+                          scope=e.scope or f"{op} has no value this method can reach; nothing is reported",
+                          complete=False, notes=e.notes + ["a series or integral that does not clearly converge is "
+                                                           "reported without a value rather than with a doubtful one"])
+            ev.flag(e.code, e.message)
+            return ev
         except NoConv as e:
             ev = Evidence(button=NAME, result=None, method="numeric",
                           scope=f"{op} did not converge; nothing is reported", complete=False)

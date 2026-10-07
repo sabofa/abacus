@@ -135,6 +135,23 @@ def test_identify_random_digits_find_nothing_and_say_it_is_not_a_proof():
     assert "not a proof" in ev.scope or "not a proof" in notes(ev)
 
 
+def test_identify_random_15_digit_decimals_give_no_spurious_relation():
+    # 15 digits is the float limit and the "reliable" threshold: a relation found there must not be an accident.
+    import random
+    rnd = random.Random(7)
+    for _ in range(6):
+        v = "0." + str(rnd.randint(1, 9)) + "".join(rnd.choice("0123456789") for _ in range(13)) + str(rnd.randint(1, 9))
+        ev = run("identify", value=v)
+        assert ev.result["digits_used"] == 15
+        assert ev.result["candidates"] == [], (v, ev.result["candidates"])
+
+
+def test_identify_the_golden_ratio_is_one_candidate():
+    ev = run("identify", value="1.6180339887498948482045868343656")
+    golden = [c for c in ev.result["candidates"] if sp.simplify(sp.sympify(c["expression"]) - (1 + sp.sqrt(5)) / 2) == 0]
+    assert len(golden) == 1, exprs(ev)
+
+
 def test_identify_candidates_are_ordered_simplest_first():
     ev = run("identify", value="0.5772156649015328606")
     lens = [c["coefficient_digits"] for c in ev.result["candidates"]]
@@ -289,8 +306,63 @@ def test_extremum_bound_forms():
 
 def test_extremum_unbounded_infimum_is_flagged():
     ev = run("extremum", f="exp(-x)", vars={"x": [0, "oo"]}, goal="min", seed=1)
-    assert "optimum_at_infinity" in codes(ev) or "boundary_optimum" in codes(ev)
-    assert any("infinity" in n or "infimum" in n for n in ev.notes + [f["message"] for f in ev.flags])
+    assert codes(ev) == ["optimum_at_infinity"]
+    assert any("infimum" in n for n in ev.notes)
+    assert any("infinity" in f["message"] for f in ev.flags)
+
+
+def test_extremum_lagrange_on_an_unbounded_variable_does_not_claim_a_minimum():
+    # x**3 - 3x has a local minimum -2 at x = 1 but the infimum on the real line is -oo
+    ev = run("extremum", f="x**3 - 3*x", vars={"x": [None, None]}, method="lagrange", seed=1)
+    assert "optimum_at_infinity" in codes(ev)
+    assert ev.complete is False
+    assert any("not the global optimum" in n for n in ev.notes)
+    # a function that really has a minimum on the line is not flagged
+    ev = run("extremum", f="x**2 - 2*x", vars={"x": [None, None]}, method="lagrange", seed=1)
+    assert "optimum_at_infinity" not in codes(ev) and ev.complete is True
+
+
+@pytest.mark.parametrize("kw", [
+    dict(f="x + 1/x", vars={"x": ["-oo", "oo"]}),
+    dict(f="-x", vars={"x": [0, "oo"]}),
+])
+def test_extremum_unbounded_problems_stop_early(kw):
+    import time
+    t = time.monotonic()
+    ev = run("extremum", seed=1, **kw)
+    assert "optimum_at_infinity" in codes(ev) and "budget_stop" not in codes(ev)
+    assert time.monotonic() - t < 8
+    assert ev.result["starts"] < 20
+
+
+RASTRIGIN = "20 + (x**2 - 10*cos(2*pi*x)) + (y**2 - 10*cos(2*pi*y))"
+
+
+def test_extremum_auto_cross_checks_a_multimodal_function():
+    ev = run("extremum", f=RASTRIGIN, vars={"x": [-5.12, 5.12], "y": [-5.12, 5.12]}, seed=1)
+    assert abs(ev.result["best"]["value"]) < 1e-6      # the global minimum 0, not the nearest local one (0.995)
+    assert "multimodal" in codes(ev)
+    assert "evolution" in ev.result["methods_run"]
+    assert "not proofs" in notes(ev) + " ".join(f["message"] for f in ev.flags)
+
+
+def test_extremum_a_single_optimum_is_not_multimodal():
+    ev = run("extremum", f="(x - 1)**2 + (y + 2)**2", vars={"x": [-5, 5], "y": [-5, 5]}, seed=1)
+    assert "multimodal" not in codes(ev) and ev.result["methods_run"] == ["multistart"]
+
+
+def test_extremum_grid_near_optimal_holds_only_polished_points():
+    ev = run("extremum", f="x**2 + y**2", vars={"x": [-3, 3], "y": [-3, 3]}, method="grid", seed=1)
+    assert ev.result["best"]["value"] < 1e-9
+    for e in ev.result["near_optimal"]:   # a raw grid seed (value 4.5e-4 and up) is not a result
+        assert e["gap"] < 1e-6, e
+
+
+def test_extremum_near_optimal_drops_unconverged_garbage():
+    ev = run("extremum", f="x**2 + y**2", vars={"x": [None, None], "y": [None, None]},
+             constraints=["x*y >= 1"], seed=1)
+    assert ev.result["best"]["value"] == pytest.approx(2.0, abs=1e-6)
+    assert all(e["value"] < 1e3 for e in ev.result["near_optimal"]), ev.result["near_optimal"]
 
 
 @pytest.mark.parametrize("kw", [
@@ -418,15 +490,119 @@ def test_numeric_states_its_digits():
     assert len(ev.result["value"].replace(".", "").lstrip("0")) >= 50
 
 
-def test_numeric_slow_convergence_is_noted_for_a_slow_sum():
+def test_numeric_slow_convergence_is_flagged_and_the_value_is_right():
     ev = run("numeric", op="sum", expr="1/n**(11/10)", var="n", lo="1", hi="oo", digits=20)
+    assert codes(ev) == ["slow_convergence"], ev.flags
     assert any("converge" in n for n in ev.notes), ev.notes
-    assert "slow_convergence" in codes(ev) or "low_accuracy" in codes(ev)
+    with mp.workdps(40):
+        assert abs(mpv(ev, 40) - mp.zeta(mp.mpf(11) / 10)) < mp.mpf(10) ** -18
+    assert ev.complete is True and ev.result["reliable_digits"] >= 19
+
+
+@pytest.mark.parametrize("expr,lo,code", [
+    ("1/n", "1", "divergent"),
+    ("1", "1", "divergent"),
+    ("2**n", "0", "divergent"),
+    ("(-1)**n", "0", "divergent"),
+    ("n", "1", "divergent"),
+    ("1/(n*log(n+1))", "1", None),     # borderline: diverges, and a numeric test cannot tell it from p > 1
+])
+def test_numeric_divergent_and_oscillating_sums_are_flagged_not_reported(expr, lo, code):
+    ev = run("numeric", op="sum", expr=expr, var="n", lo=lo, hi="oo", digits=30)
+    assert ev.complete is False
+    assert ev.result is None
+    assert set(codes(ev)) & {"divergent", "no_convergence"}
+    if code:
+        assert code in codes(ev), ev.flags
+
+
+@pytest.mark.parametrize("expr,lo,exact", [
+    ("1/n**2", "1", "pi**2/6"),
+    ("1/n**3", "1", "zeta(3)"),
+    ("1/n**4", "1", "pi**4/90"),
+    ("(-1)**n/n", "1", "-log(2)"),
+    ("1/2**n", "0", "2"),
+])
+def test_numeric_convergent_sums_are_still_computed(expr, lo, exact):
+    ev = run("numeric", op="sum", expr=expr, var="n", lo=lo, hi="oo", digits=30)
+    assert ev.complete is True and not ({"divergent", "no_convergence"} & set(codes(ev))), ev.flags
+    assert ev.result["reliable_digits"] >= 29
+    with mp.workdps(50):
+        assert abs(mpv(ev, 50) - mp.mpf(str(sp.N(sp.sympify(exact), 50)))) < mp.mpf(10) ** -29
+
+
+def test_numeric_divergent_product_is_flagged():
+    ev = run("numeric", op="product", expr="1 + 1/n", var="n", lo="1", hi="oo")
+    assert ev.complete is False and ev.result is None and "divergent" in codes(ev)
+
+
+@pytest.mark.parametrize("expr", ["sin(x)", "1", "cos(x**2)"])
+def test_numeric_infinite_integrals_with_no_limit_are_not_reported(expr):
+    # mpmath returned about -2.5e44 for sin(x) with an error estimate of 1 and a clean "30 digits"
+    ev = run("numeric", op="integral", expr=expr, var="x", lo="0", hi="oo")
+    assert ev.complete is False
+    assert "no_convergence" in codes(ev)
+    assert ev.result is None or ev.result["reliable_digits"] == 0, ev.result
+
+
+def test_numeric_infinite_integrals_that_converge_are_still_computed():
+    ev = run("numeric", op="integral", expr="exp(-x**2)", var="x", lo="0", hi="oo")
+    assert ev.complete is True and ev.result["reliable_digits"] >= 29
+    with mp.workdps(50):
+        assert abs(mpv(ev, 50) - mp.sqrt(mp.pi) / 2) < mp.mpf(10) ** -29
+    ev = run("numeric", op="integral", expr="1/(1 + x**2)", var="x", lo="-oo", hi="oo")
+    with mp.workdps(50):
+        assert ev.complete is True and abs(mpv(ev, 50) - mp.pi) < mp.mpf(10) ** -29
+
+
+def test_numeric_oscillating_decaying_integral_is_either_right_or_flagged():
+    ev = run("numeric", op="integral", expr="cos(x**2)", var="x", lo="0", hi="oo")
+    if ev.complete:
+        with mp.workdps(50):
+            assert abs(mpv(ev, 50) - mp.sqrt(mp.pi / 8)) < mp.mpf(10) ** -(ev.result["reliable_digits"] - 1)
+    else:
+        assert "no_convergence" in codes(ev)
+        assert ev.result is None or abs(mp.mpf(ev.result["value"])) < 1e6   # never the 1e44 garbage
+
+
+def test_numeric_removable_singularity_inside_the_range():
+    ev = run("numeric", op="integral", expr="sin(x)/x", var="x", lo="-1", hi="1")
+    assert ev.complete is True and "bad_input" not in codes(ev)
+    with mp.workdps(50):
+        assert abs(mpv(ev, 50) - 2 * mp.si(1)) < mp.mpf(10) ** -29
+    ev = run("numeric", op="integral", expr="sin(x - 1)/(x - 1)", var="x", lo="0", hi="2")   # at the midpoint
+    assert ev.complete is True
+    with mp.workdps(50):
+        assert abs(mpv(ev, 50) - 2 * mp.si(1)) < mp.mpf(10) ** -29
+
+
+def test_numeric_a_real_pole_inside_the_range_is_not_integrated_through():
+    ev = run("numeric", op="integral", expr="1/x", var="x", lo="-1", hi="1")
+    assert ev.complete is False
+
+
+def test_numeric_root_without_a_sign_change_in_the_bracket_is_flagged():
+    ev = run("numeric", op="root", expr="x**2 - 4", var="x", x0=["0", "1"])
+    assert "no_sign_change" in codes(ev) and "root_outside_bracket" in codes(ev)
+    ev = run("numeric", op="root", expr="x**2 - 4", var="x", x0=["0", "3"])
+    assert not {"no_sign_change", "root_outside_bracket"} & set(codes(ev))
+
+
+@pytest.mark.parametrize("expr", ["(x - 1)**2", "(x - 1)**3"])
+def test_numeric_a_multiple_root_is_found_through_the_derivative(expr):
+    ev = run("numeric", op="root", expr=expr, var="x", x0="3")
+    assert ev.complete is True and "multiple_root" in codes(ev)
+    assert abs(mpv(ev) - 1) < mp.mpf(10) ** -25
+
+
+def test_numeric_a_simple_root_is_not_marked_multiple():
+    ev = run("numeric", op="root", expr="x**2 - 4", var="x", x0="3")
+    assert "multiple_root" not in codes(ev)
 
 
 def test_numeric_large_error_estimate_is_noted_for_an_oscillatory_integral():
     ev = run("numeric", op="integral", expr="sin(x)/x", var="x", lo="0", hi="oo")
-    assert {"low_accuracy", "no_convergence"} & set(codes(ev))
+    assert "no_convergence" in codes(ev) and ev.complete is False
     assert ev.precision["digits"] < 30
     assert any("error estimate" in n for n in ev.notes)
 

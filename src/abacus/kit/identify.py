@@ -210,8 +210,26 @@ def _run(inp: dict, ctx) -> Evidence:
     stopped = False
     tried = 0
 
+    def same_as(expr):
+        """The key of a candidate already held that is the same expression (the golden ratio comes out as a linear
+        relation, 1/2 + sqrt(5)/2, and as an algebraic number, (1 + sqrt(5))/2: one candidate, not two)."""
+        key = str(sp.expand(expr))
+        if key in cands:
+            return key
+        with mp.workdps(dps):
+            v = mp.mpf(str(sp.N(expr, dps)))
+        for k, e in sym.items():
+            with mp.workdps(dps):
+                if abs(mp.mpf(str(sp.N(e, dps))) - v) <= mp.mpf(10) ** (-dps + 5) * (1 + abs(v)):
+                    try:
+                        if sp.simplify(e - expr) == 0:
+                            return k
+                    except (TypeError, ValueError):
+                        pass
+        return key
+
     def add(kind, expr, res, coeffs, extra=None):
-        key = f"{kind}|{expr}"
+        key = same_as(expr)
         c = {"kind": kind, "expression": str(expr), "latex": sp.latex(expr), "residual": _fmt_err(res),
              "digits_used": n_dig,
              "agreeing_digits": round(float(-mp.log10(res / abs(x))), 1) if res > 0 else None,
@@ -220,7 +238,18 @@ def _run(inp: dict, ctx) -> Evidence:
             c.update(extra)
         c["_key"] = key
         old = cands.get(key)
-        if old is None or c["coefficient_digits"] < old["coefficient_digits"]:
+        if old is not None:
+            # The same number found two ways: one candidate. An algebraic find keeps its polynomial (the stronger
+            # statement); the simplest coefficients and the other kind are recorded.
+            keep, other = (c, old) if (c["kind"] == "algebraic" and old["kind"] != "algebraic") else (old, c)
+            keep = dict(keep)
+            keep["coefficient_digits"] = min(c["coefficient_digits"], old["coefficient_digits"])
+            keep["also_found_as"] = sorted({other["kind"], *keep.get("also_found_as", ())} - {keep["kind"]})
+            if not keep["also_found_as"]:
+                del keep["also_found_as"]
+            cands[key] = keep
+            sym[key] = expr if keep["expression"] == c["expression"] else sym[key]
+        else:
             cands[key] = c
             sym[key] = expr
 
