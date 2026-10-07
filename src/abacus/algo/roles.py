@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import secrets
+import time
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Any
 
 from .. import __version__, budget, registry
@@ -143,6 +145,22 @@ def algo_run(inp: dict, ctx) -> Evidence:
                     scope=f"the naive-search size hand_space(params) returned for {algo.meta['id']} [{algo.hash}]")
 
 
+def _record_usage(algo_path, role: str, ev: Evidence, elapsed_s: float) -> None:
+    """One usage.jsonl line for a run of an algorithm that lives in the library (kit/06 s4). Anything
+    else is not recorded, nor is an input the budget rejected before it ran (it sets no `budget`).
+    This can never fail a run: every error is swallowed."""
+    try:
+        from ..library import store, usage
+
+        # Resolve against the working directory first: store.path_to_id reads a relative path as
+        # library-relative, but the file that ran is the one that load_algo found from here.
+        p = Path(algo_path).resolve()
+        if ev.budget and p.is_file():
+            usage.record(store.path_to_id(p), role, round(elapsed_s, 3), ev.complete)
+    except Exception:  # noqa: BLE001 - not an algorithm in the library, or no way to write the log
+        pass
+
+
 def run_role(algo_path, role: str, *, args: dict | None = None, seed: int | None = None,
              knobs: dict | None = None, time_s: float | None = None, in_process: bool = False) -> Evidence:
     """Run one role of an algorithm file. `args` holds the role's own arguments and nothing else:
@@ -160,4 +178,7 @@ def run_role(algo_path, role: str, *, args: dict | None = None, seed: int | None
     inp: dict = {"path": str(algo_path), "role": role, "knobs": dict(knobs or {}), "args": args}
     if seed is not None:
         inp["seed"] = seed
-    return budget.call(BUTTON, inp, time_s=time_s, in_process=in_process, full=True)
+    t0 = time.monotonic()
+    ev = budget.call(BUTTON, inp, time_s=time_s, in_process=in_process, full=True)
+    _record_usage(algo_path, role, ev, time.monotonic() - t0)
+    return ev

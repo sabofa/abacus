@@ -29,7 +29,7 @@ def test_missing_input_file_exits_2(capsys):
     assert main(["t_seeded", "--input", "no/such/file.json"]) == 2
 
 
-@pytest.mark.parametrize("stub", ["link", "mint", "index"])
+@pytest.mark.parametrize("stub", ["mint"])
 def test_stubs(stub, capsys):
     assert main([stub]) == 2
     assert "not built yet" in capsys.readouterr().out

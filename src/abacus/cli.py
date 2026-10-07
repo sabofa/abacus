@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 
 from pathlib import Path
 
 from . import budget, registry, sandbox  # noqa: F401  (sandbox registers the `run` button)
 from .algo import roles as _roles, surface as _surface  # noqa: F401  (register the algo buttons)
+from .algo.loader import AlgoImportError
+from .library import surface as _library_surface  # noqa: F401  (register the library buttons)
 
-STUBS = ("link", "mint", "index")
-COMMANDS = ("run", "mcp", "buttons", "algo") + STUBS
+STUBS = ("mint",)
+COMMANDS = ("run", "mcp", "buttons", "algo", "link", "index") + STUBS
 
 
 def button_names() -> list[str]:
@@ -21,6 +24,11 @@ def button_names() -> list[str]:
 
 def _emit(ev, pretty: bool, full: bool) -> None:
     print(json.dumps(ev.to_dict(full=full), indent=2 if pretty else None, ensure_ascii=False))
+
+
+# What a library command raises for bad input or a bad file: one line on stderr, exit 2, no traceback.
+# (AlgoImportError is not a ValueError; MetaError is.)
+_LIBRARY_ERRORS = (AlgoImportError, ValueError, OSError, sqlite3.Error)
 
 
 def _err(msg: str) -> int:
@@ -127,10 +135,25 @@ def _json_arg(text, what):
     return v
 
 
+def _oneline(e: BaseException) -> str:
+    return " ".join(str(e).split()) or type(e).__name__
+
+
+def _dump(obj, pretty: bool) -> None:
+    print(json.dumps(obj, indent=2 if pretty else None, ensure_ascii=False))
+
+
+def _looks_like_path(arg: str) -> bool:
+    """`algo show` takes a file or a library id. A file is anything with a separator or a .py ending, or
+    that exists; the rest is an id, so a typo gets the id error rather than "no such file"."""
+    return arg.endswith(".py") or "/" in arg or "\\" in arg or Path(arg).is_file()
+
+
 def _algo(rest: list[str]) -> int:
     from .algo.lint import DEFAULT_K
     from .algo.loader import AlgoImportError, MetaError, _ID_RE, algo_hash, load_algo
     from .algo.roles import RUN_ROLES, run_role
+    from .library import index, surface
 
     p = argparse.ArgumentParser(prog="abacus algo")
     sub = p.add_subparsers(dest="sub", required=True)
@@ -141,9 +164,20 @@ def _algo(rest: list[str]) -> int:
     li.add_argument("file")
     li.add_argument("-k", type=int, default=DEFAULT_K)
     _common(li)
-    sh = sub.add_parser("show", help="print META and hash")
-    sh.add_argument("file")
+    sh = sub.add_parser("show", help="print META and hash; for a library id, also its links and usage count")
+    sh.add_argument("file", metavar="ID_OR_FILE")
     _common(sh)
+    se = sub.add_parser("search", help="search the library; prints a JSON list")
+    se.add_argument("query", nargs="?", default="", help="words that must all match id, title, summary, tags, techniques")
+    se.add_argument("--role")
+    se.add_argument("--tag")
+    se.add_argument("--technique")
+    se.add_argument("--format", dest="answer_format", metavar="FORMAT", help="the answer format, such as integer")
+    se.add_argument("--linked", metavar="SPEC", help="a consumer ('osmosis') or one full target")
+    se.add_argument("--unlinked", action="store_true", help="only algorithms with no link at all")
+    se.add_argument("--sort", choices=index.SORTS, default="id")
+    se.add_argument("--limit", type=int, default=50)
+    se.add_argument("--pretty", action="store_true", help="indent the JSON output")
     ls = sub.add_parser("list", help="list the algorithm files in a directory")
     ls.add_argument("dir", nargs="?", default=None)
     ru = sub.add_parser("run", help="run one role")
@@ -178,12 +212,26 @@ def _algo(rest: list[str]) -> int:
         _emit(budget.call("algo_lint", {"path": str(Path(a.file).resolve()), "k": a.k}, time_s=a.time), a.pretty, True)
         return 0
     if a.sub == "show":
+        if not _looks_like_path(a.file):
+            try:
+                _dump(surface.show_record(a.file), a.pretty)
+            except _LIBRARY_ERRORS as e:
+                return _err(_oneline(e))
+            return 0
         try:
             algo = load_algo(a.file)
         except (AlgoImportError, MetaError) as e:
             return _err(str(e))
         print(json.dumps({"hash": algo.hash, "path": str(algo.path), "meta": algo.meta},
                          indent=2 if a.pretty else None, ensure_ascii=False))
+        return 0
+    if a.sub == "search":
+        try:
+            _dump(index.search(a.query, role=a.role, tag=a.tag, technique=a.technique,
+                               answer_format=a.answer_format, linked=a.linked, unlinked=a.unlinked,
+                               sort=a.sort, limit=a.limit), a.pretty)
+        except _LIBRARY_ERRORS as e:
+            return _err(_oneline(e))
         return 0
     if a.sub == "list":
         from .config import get_config
@@ -208,6 +256,72 @@ def _algo(rest: list[str]) -> int:
     return 0
 
 
+def _parse(p: argparse.ArgumentParser, rest: list[str]):
+    """Parse, turning argparse's exit into a return code; None (and the code) when it exited."""
+    try:
+        return p.parse_args(rest), None
+    except SystemExit as e:
+        return None, int(e.code or 0)
+
+
+def _link(rest: list[str]) -> int:
+    from .library import links
+
+    p = argparse.ArgumentParser(prog="abacus link", description="Ties between algorithms and items in a consumer.")
+    sub = p.add_subparsers(dest="sub", required=True)
+    ad = sub.add_parser("add", help="tie an algorithm to a target")
+    ad.add_argument("algo")
+    ad.add_argument("target", help="<consumer>:<kind>:<id>, such as osmosis:q:6b1f0a")
+    ad.add_argument("--kind", required=True, metavar="{" + ",".join(links.KINDS) + "}")
+    ad.add_argument("--hash", dest="algo_hash", metavar="H", help="the algorithm hash the item was made from")
+    ad.add_argument("--seed", type=int, default=None)
+    ad.add_argument("--batch", default=None)
+    rm = sub.add_parser("rm", help="remove every link between an algorithm and a target")
+    rm.add_argument("algo")
+    rm.add_argument("target")
+    ls = sub.add_parser("list", help="list links, in file order")
+    ls.add_argument("--algo", default=None)
+    ls.add_argument("--consumer", default=None, help="a consumer prefix: osmosis, or osmosis:q")
+    fi = sub.add_parser("find", help="every link to exactly this target")
+    fi.add_argument("target")
+    for q in (ad, rm, ls, fi):
+        q.add_argument("--pretty", action="store_true", help="indent the JSON output")
+    a, code = _parse(p, rest)
+    if a is None:
+        return code
+    try:
+        if a.sub == "add":
+            out = links.add(a.algo, a.target, a.kind, algo_hash=a.algo_hash, seed=a.seed, batch=a.batch)
+        elif a.sub == "rm":
+            out = {"removed": links.rm(a.algo, a.target)}
+        elif a.sub == "list":
+            out = links.list_links(algo=a.algo, consumer=a.consumer)
+        else:
+            out = links.find(a.target)
+    except _LIBRARY_ERRORS as e:
+        return _err(_oneline(e))
+    _dump(out, a.pretty)
+    return 0
+
+
+def _index(rest: list[str]) -> int:
+    from .library import index
+
+    p = argparse.ArgumentParser(prog="abacus index", description="The derived search index of the library.")
+    sub = p.add_subparsers(dest="sub", required=True)
+    rb = sub.add_parser("rebuild", help="rebuild the index from the files; prints the problems found, as JSON")
+    rb.add_argument("--pretty", action="store_true", help="indent the JSON output")
+    a, code = _parse(p, rest)
+    if a is None:
+        return code
+    try:
+        problems = index.rebuild()
+    except _LIBRARY_ERRORS as e:
+        return _err(_oneline(e))
+    _dump(problems, a.pretty)
+    return 0
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
@@ -225,6 +339,10 @@ def main(argv=None) -> int:
         return 0
     if cmd == "algo":
         return _algo(rest)
+    if cmd == "link":
+        return _link(rest)
+    if cmd == "index":
+        return _index(rest)
     if cmd in STUBS:
         print(f"abacus {cmd}: not built yet")
         return 2
