@@ -18,6 +18,7 @@ from . import _algebra as alg
 from . import _continuous as C
 
 NAME = "numeric"
+PEAK_RANGE = 10 ** 4     # |f| is tracked where the quadrature samples within this distance of the origin
 GUARD = 10            # extra working digits beyond what was asked
 NoConv = mp.mp.NoConvergence
 SHIFT = 8             # terms summed directly when checking an infinite sum by shifting its start
@@ -133,6 +134,7 @@ class _Fn:
         self.f = sp.lambdify(list(names), expr, modules="mpmath")
         self.ctx = ctx
         self.calls = 0
+        self.peak = mp.mpf(0)   # the largest |f| seen at a one-variable argument within PEAK_RANGE of the origin
 
     def __call__(self, *a):
         self.calls += 1
@@ -141,7 +143,14 @@ class _Fn:
         if self.calls % 2000 == 0:
             self.ctx.progress({"result": None, "method": "numeric",
                                "scope": f"stopped before a value; {self.calls} evaluations so far"})
-        return self.f(*a)
+        r = self.f(*a)
+        if len(a) == 1:
+            try:
+                if abs(a[0]) <= PEAK_RANGE:
+                    self.peak = max(self.peak, abs(r))
+            except (TypeError, ValueError):
+                pass
+        return r
 
 
 def _expr(src, names, what="the expression"):
@@ -167,33 +176,36 @@ class _Out:
         self.scope, self.notes, self.flags, self.extra = scope, notes or [], flags or [], extra or {}
 
 
-def _alt_points(a, b):
-    """A different split of an infinite range (a second, independent run of the quadrature)."""
+def _geo_points(a, b, base, kmax):
+    """Split points for an infinite range, at geometrically growing distances from the finite end (or from 0 on the
+    whole line): tanh-sinh resolves a peak far from the end, or a narrow one, only when it is cut into pieces of
+    comparable scale. Different bases give different, independent runs of the quadrature."""
+    reach = [mp.mpf(base) ** k for k in range(kmax)]
     if a == -mp.inf and b == mp.inf:
-        return [a, -1, 0, 1, b]
+        return [a] + [-t for t in reversed(reach)] + [mp.mpf(0)] + reach + [b]
     if b == mp.inf:
-        return [a, a + 1, a + 10, b]
+        mid = [a + t for t in reach]
+        return sorted(set([a] + mid + ([mp.mpf(0)] if a < 0 else []))) + [b]
     if a == -mp.inf:
-        return [a, b - 10, b - 1, b]
+        mid = [b - t for t in reach]
+        return [a] + sorted(set(mid + ([mp.mpf(0)] if b > 0 else []))) + [b]
     return [a, b]
 
 
 def _finite_scale(f, a, b) -> mp.mpf:
-    """The largest |f| on a sample of the finite part of the range (10 units next to the finite end)."""
-    if a == -mp.inf and b == mp.inf:
-        lo, hi = mp.mpf(-10), mp.mpf(10)
-    elif b == mp.inf:
-        lo, hi = a, a + 10
-    elif a == -mp.inf:
-        lo, hi = b - 10, b
+    """How large the integrand gets on the part of the range the quadrature can really see: the largest |f| it
+    evaluated within PEAK_RANGE of the origin, and on log-spaced points (0.001 to 1000) out from the finite end."""
+    ends = [x for x in (a, b) if x not in (mp.inf, -mp.inf)]
+    offsets = [mp.mpf(10) ** (mp.mpf(k) / 4) for k in range(-12, 13)]
+    if not ends:
+        pts = [s * t for t in offsets for s in (1, -1)] + [mp.mpf(0)]
     else:
-        lo, hi = a, b
-    best = mp.mpf(0)
-    for k in range(1, 40):
-        x = lo + (hi - lo) * k / 40
+        pts = [e + (1 if e == a else -1) * t for e in ends for t in offsets] + ends
+    best = f.peak
+    for x in pts:
         try:
             best = max(best, abs(f.f(x)))
-        except (ZeroDivisionError, ValueError, ArithmeticError):
+        except (ZeroDivisionError, ValueError, ArithmeticError, TypeError):
             continue
     return best
 
@@ -211,6 +223,8 @@ def _op_integral(inp, ctx, digits):
     # Tanh-sinh evaluates the midpoint of a symmetric range; an integrand undefined there (sin(x)/x at 0, a removable
     # singularity) would be rejected, so a range that contains 0 is split at 0 and its pieces never touch it.
     pts = [a, 0, b] if a < 0 < b else [a, b]
+    if infinite:
+        pts = _geo_points(a, b, 2, 12)
     try:
         val, err = mp.quad(f, pts, error=True, maxdegree=deg)
     except ZeroDivisionError:
@@ -235,7 +249,7 @@ def _op_integral(inp, ctx, digits):
         # mpmath's own error estimate is absolute and can be tiny next to a huge, meaningless value (1 against 1e44),
         # so an infinite range is always computed a second time on a different split and degree, and the two must
         # agree. A value enormous next to the integrand on the finite part is a divergent integral, not an answer.
-        val2, err2 = mp.quad(f, _alt_points(a, b), error=True, maxdegree=deg + 1)
+        val2, err2 = mp.quad(f, _geo_points(a, b, 3, 8), error=True, maxdegree=deg + 1)
         err = max(err, err2, abs(val - val2))
         if err2 < err and abs(val - val2) <= err2:
             val = val2
@@ -537,6 +551,16 @@ def _op_root(inp, ctx, digits):
         start = [_real(s, "x0") for s in x0]
         if len(start) == 2:
             fa, fb = fs[0](start[0]), fs[0](start[1])
+            if fa == fb and fa != 0:
+                # the bracketing solver divides by f(b) - f(a); equal end values leave it nothing to work with
+                raise _Fail("no_sign_change",
+                            f"f has the same value ({mp.nstr(fa, 8)}) at both ends of the bracket "
+                            f"[{mp.nstr(start[0], 8)}, {mp.nstr(start[1], 8)}], so there is no sign change and the "
+                            f"bracketing solver has no slope to follow: no root is guaranteed in it, and none is "
+                            f"reported",
+                            f"mpmath findroot (anderson bracketing) for {exprs[0]} on {inp['x0']}: the bracket has "
+                            f"no sign change; nothing is reported",
+                            ["give a bracket whose ends have opposite signs, or a single start value"])
             if fa * fb > 0:
                 flags.append(("no_sign_change", f"f has the same sign at both ends of the bracket "
                                                 f"[{mp.nstr(start[0], 8)}, {mp.nstr(start[1], 8)}]: a root there is "
@@ -750,6 +774,13 @@ def _finish(inp, out: _Out, digits: int) -> Evidence:
     if shown != digits:
         result["requested_digits"] = digits
     result.update(out.extra)
+    # An integral whose error estimate is too large for any digits is flagged and carries no value: mpmath's estimate
+    # is a self-check that a slowly converging (1/x**1.1) or divergent (1/x) integral beats, so a "rough value" with
+    # digits and an error attached would claim more than the evidence supports.
+    withheld = inp["op"] == "integral" and reliable < min(digits, 5)
+    if withheld:
+        result = {"op": inp["op"], "value": None, "digits": 0, "reliable_digits": 0, "requested_digits": digits}
+        result.update(out.extra)
     notes, flags = list(out.notes), list(out.flags)
     if any(zero):
         notes.append(f"a value indistinguishable from zero (smaller than its error estimate {mp.nstr(err, 3)}) is "
@@ -761,7 +792,9 @@ def _finish(inp, out: _Out, digits: int) -> Evidence:
                                         f"{min(digits, 5)} digits can be trusted"))
         notes.append(f"error estimate {mp.nstr(err, 3)} is too large for the value (fewer than {min(digits, 5)} digits "
                      f"are reliable): the integral or series may diverge, oscillate, have a non-integrable "
-                     f"singularity, or converge too slowly. The value shown is a rough magnitude only")
+                     f"singularity, or converge too slowly. " +
+                     ("No value is reported: the quadrature's own number is not trustworthy to even one digit"
+                      if withheld else "The value shown is a rough magnitude only"))
     elif reliable < digits:
         flags.append(("low_accuracy", f"only about {reliable} of {digits} requested digits are reliable"))
         notes.append(f"error estimate {mp.nstr(err, 3)} is larger than the {digits}-digit target: only about "
@@ -769,10 +802,13 @@ def _finish(inp, out: _Out, digits: int) -> Evidence:
     if any(c == "slow_convergence" for c, _ in flags) and not any("converge" in n for n in notes):
         notes.append("convergence is slow")
     ev = Evidence(button=NAME, result=result, method="numeric", scope=out.scope, complete=complete,
-                  precision={"digits": reliable, "error_estimate": mp.nstr(err, 3)}, notes=notes)
+                  precision={"digits": 0} if withheld else {"digits": reliable, "error_estimate": mp.nstr(err, 3)},
+                  notes=notes)
     for code, msg in flags:
         ev.flag(code, msg)
-    if "proposed" in inp:
+    if "proposed" in inp and withheld:
+        ev.notes.append("proposed was not compared: the integral has no reliable value")
+    elif "proposed" in inp:
         if out.scalar:
             tol = max(err, abs(out.vals[0]) * mp.mpf(10) ** -shown)
             C.tolerance_compare(ev, inp["proposed"], out.vals[0], tol, lambda s: C.parse(s))

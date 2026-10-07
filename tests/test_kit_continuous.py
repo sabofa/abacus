@@ -331,6 +331,9 @@ def test_extremum_unbounded_problems_stop_early(kw):
     t = time.monotonic()
     ev = run("extremum", seed=1, **kw)
     assert "optimum_at_infinity" in codes(ev) and "budget_stop" not in codes(ev)
+    assert ev.complete is False
+    assert ev.result["best"] is None                      # not the -4e12 sample on the way to infinity
+    assert abs(ev.result["probe_value"]["value"]) > 1e3   # it is kept, but labelled as a probe
     assert time.monotonic() - t < 8
     assert ev.result["starts"] < 20
 
@@ -541,8 +544,9 @@ def test_numeric_infinite_integrals_with_no_limit_are_not_reported(expr):
     # mpmath returned about -2.5e44 for sin(x) with an error estimate of 1 and a clean "30 digits"
     ev = run("numeric", op="integral", expr=expr, var="x", lo="0", hi="oo")
     assert ev.complete is False
-    assert "no_convergence" in codes(ev)
-    assert ev.result is None or ev.result["reliable_digits"] == 0, ev.result
+    assert codes(ev) == ["no_convergence"]
+    assert _value(ev) is None, ev.result
+    assert (ev.result or {}).get("reliable_digits", 0) == 0
 
 
 def test_numeric_infinite_integrals_that_converge_are_still_computed():
@@ -647,3 +651,47 @@ def test_numeric_leaves_the_global_precision_alone():
     run("numeric", op="integral", expr="exp(-x**2)", var="x", lo="0", hi="oo", digits=80)
     run("identify", value="0.5772156649015328606")
     assert mp.mp.dps == before
+
+
+# ---------------------------------------------------------------- T6 review round 2
+
+
+def _value(ev):
+    return None if ev.result is None else ev.result.get("value")
+
+
+@pytest.mark.parametrize("expr,lo,hi,true", [
+    ("exp(-100*x)", "0", "oo", lambda: mp.mpf(1) / 100),
+    ("exp(-1000*x)", "0", "oo", lambda: mp.mpf(1) / 1000),
+    ("x**40*exp(-x)", "0", "oo", lambda: mp.factorial(40)),
+    ("exp(-(x - 20)**2)", "0", "oo", lambda: mp.sqrt(mp.pi) * (1 + mp.erf(20)) / 2),
+    ("exp(-(x - 50)**2)", "-oo", "oo", lambda: mp.sqrt(mp.pi)),
+])
+def test_numeric_fast_decaying_or_shifted_integrals_are_not_rejected(expr, lo, hi, true):
+    # the scale test used to compare against |f| on the first 10 units only, so each of these looked "enormous"
+    ev = run("numeric", op="integral", expr=expr, var="x", lo=lo, hi=hi, digits=20)
+    assert ev.complete is True and "no_convergence" not in codes(ev), (ev.flags, ev.result)
+    assert ev.result["reliable_digits"] >= 15
+    with mp.workdps(60):
+        t = true()
+        assert abs(mpv(ev, 60) - t) <= abs(t) * mp.mpf(10) ** -15
+
+
+@pytest.mark.parametrize("expr", ["1/x", "x**(-1.1)"])
+def test_numeric_slow_or_divergent_infinite_integrals_carry_no_digits(expr):
+    ev = run("numeric", op="integral", expr=expr, var="x", lo="1", hi="oo")
+    assert ev.complete is False and codes(ev) == ["no_convergence"]
+    assert _value(ev) is None
+    assert (ev.result or {}).get("reliable_digits", 0) == 0
+    assert "error_estimate" not in (ev.result or {}) and (ev.precision or {}).get("digits", 0) == 0
+
+
+def test_numeric_flagged_finite_divergent_integral_carries_no_digits():
+    ev = run("numeric", op="integral", expr="1/x", var="x", lo="0", hi="1")
+    assert ev.complete is False
+    assert _value(ev) is None and (ev.result or {}).get("reliable_digits", 0) == 0
+
+
+def test_numeric_root_with_equal_ends_and_equal_signs_is_no_sign_change_not_bad_input():
+    ev = run("numeric", op="root", expr="x**2 - 4", var="x", x0=["-3", "3"])
+    assert "bad_input" not in codes(ev) and "no_sign_change" in codes(ev), (ev.flags, ev.result)

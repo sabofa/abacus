@@ -526,6 +526,7 @@ def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_
     best, near, cl = _result_from(P, found)
     notes = list(notes0)
     flags = []
+    unbounded = False
     result = {"goal": inp.get("goal", "min"), "best": best, "near_optimal": near,
               "starts": found.starts, "feasible_runs": len(found.pts), "evaluations": P.evals,
               "methods_run": methods}
@@ -542,8 +543,12 @@ def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_
             flags.append(("optimum_at_infinity", f"moving {', '.join(far)} far toward infinity is as good as the "
                                                  f"best point, so the optimum may be an infimum approached but not "
                                                  f"attained"))
-            notes.append("an unbounded variable can be pushed far away at no loss: the value reported may be an "
-                         "infimum (or supremum) that is only approached, not attained")
+            notes.append("an unbounded variable can be pushed far away at no loss: there may be no optimum, only an "
+                         "infimum (or supremum) that is approached, so no best point is reported; the point the "
+                         "search ended at is given as probe_value (a sample on the way to infinity, not an optimum)")
+            result["probe_value"] = result["best"]
+            result["best"] = None
+            unbounded = True
         if found.infeasible and found.infeasible >= found.starts and found.starts:
             notes.append("no search converged to a feasible point except those reported")
     else:
@@ -574,7 +579,7 @@ def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_
     scope = (f"{'+'.join(methods)} for the {inp.get('goal', 'min')}imum of f over {P.d} variable(s): {found.starts} "
              f"search(es) run{extra_scope}, {len(found.pts)} converged to a feasible point; numeric search, "
              f"candidates not proofs")
-    ev = Evidence(button=NAME, result=result, method="search", scope=scope, complete=not stopped,
+    ev = Evidence(button=NAME, result=result, method="search", scope=scope, complete=not stopped and not unbounded,
                   precision={"value_tolerance": 1e-9, "point_tolerance": 1e-5,
                              "note": "float64 local optimiser; the value is f at the point reported, the point is "
                                      "accurate to about the square root of machine precision for smooth f"},
@@ -584,7 +589,7 @@ def _finish_numeric(inp, P: Problem, found: Found, ctx, methods, stopped, extra_
     if stopped:
         C.budget_stop(ev, "the search was cut short, so the result is the best found so far" if best is not None
                       else "no search finished")
-    if "proposed" in inp and best is not None:
+    if "proposed" in inp and result["best"] is not None:
         C.tolerance_compare(ev, inp["proposed"], best["value"], 1e-7 * (1 + abs(best["value"])), lambda s: C.parse(s))
     return ev
 
