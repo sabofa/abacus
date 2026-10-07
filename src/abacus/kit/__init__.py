@@ -5,11 +5,16 @@ run in-process (the sandbox is the AI's own Python); ``budget(...)`` runs one in
 with the time and memory guard (kit/02 §5).
 
 Importing ``abacus.kit.exact`` sets the package attribute ``exact`` to that module, which would hide
-the wrapper; ``_bind()`` runs after every ``load_all()`` and rebinds each button name to its wrapper.
+the wrapper, so the package's module class resolves every registered button name to its wrapper
+first. Submodules stay reachable through ``sys.modules`` / ``import abacus.kit.exact``.
 """
 from __future__ import annotations
 
+import sys
+from types import ModuleType
 from typing import Any
+
+_WRAPPERS: dict = {}
 
 
 def _wrapper(name: str):
@@ -18,33 +23,40 @@ def _wrapper(name: str):
         return _budget.call(name, inp, in_process=True)
 
     call.__name__ = name
+    call._abacus_button = True
     return call
 
 
-def _bind() -> None:
+def _button_wrapper(name: str):
+    if name in _WRAPPERS:
+        return _WRAPPERS[name]
     from .. import registry
     registry.load_all()
-    g = globals()
-    for b in registry.all_buttons():
-        if not callable(g.get(b.name)) or getattr(g.get(b.name), "__name__", None) != b.name \
-                or not getattr(g.get(b.name), "_abacus_button", False):
-            w = _wrapper(b.name)
-            w._abacus_button = True
-            g[b.name] = w
+    try:
+        registry.get(name)
+    except KeyError:
+        return None
+    _WRAPPERS[name] = _wrapper(name)
+    return _WRAPPERS[name]
 
 
 def budget(name: str, inp: dict, **limits: Any):
     """Run button ``name`` in a child process under the budget guard."""
-    from .. import budget as _budget
-    _bind()
+    from .. import budget as _budget, registry
+    registry.load_all()
     return _budget.call(name, inp, **limits)
 
 
-def __getattr__(name: str):
-    if name.startswith("_"):
-        raise AttributeError(name)
-    _bind()
-    g = globals()
-    if name in g and getattr(g[name], "_abacus_button", False):
-        return g[name]
-    raise AttributeError(f"abacus.kit has no button {name!r}")
+class _Kit(ModuleType):
+    def __getattribute__(self, name: str):
+        if not name.startswith("_") and name != "budget":
+            w = _button_wrapper(name)
+            if w is not None:
+                return w
+        return super().__getattribute__(name)
+
+    def __getattr__(self, name: str):
+        raise AttributeError(f"abacus.kit has no button {name!r}")
+
+
+sys.modules[__name__].__class__ = _Kit
