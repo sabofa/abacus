@@ -25,3 +25,56 @@ def test_heavy_aliases_are_lazy_and_available():
         pass
     else:
         raise AssertionError("expected NameError")
+
+
+def test_tee_close_flushes_and_nothing_is_sent_after():
+    import threading
+    import time
+
+    events, lock = [], threading.Lock()
+
+    def progress(p):
+        with lock:
+            events.append(("progress", p["result"]["stdout"]))
+
+    tee = sandbox._Tee(progress)
+    tee.write("one\n")           # t=0: sent inline
+    time.sleep(0.01)
+    tee.write("two\n")           # t=+10ms: schedules the trailing timer
+    assert tee._timer is not None
+    tee.close_stream()
+    with lock:
+        events.append(("closed", None))
+    time.sleep(0.2)              # an orphaned timer would fire here
+    with lock:
+        kinds = [k for k, _ in events]
+    assert kinds.count("closed") == 1 and kinds[-1] == "closed"
+    assert tee.getvalue() == "one\ntwo\n"
+    tee.write("late\n")
+    assert [k for k, _ in events][-1] == "closed"
+
+
+def test_tee_sends_are_serialised_and_cancel_pending_timer():
+    import threading
+
+    active, overlap = [0], []
+
+    def progress(p):
+        active[0] += 1
+        overlap.append(active[0])
+        active[0] -= 1
+
+    tee = sandbox._Tee(progress)
+    tee.write("a")
+    tee.write("b")               # timer pending
+    tee._send()                  # inline send must cancel it
+    assert tee._timer is None
+    tee.close_stream()
+    assert max(overlap) == 1 and threading.active_count() >= 1
+
+
+def test_run_turns_any_compile_failure_into_did_not_parse():
+    ev = budget.call("run", {"code": "x = (" * 1}, time_s=30)
+    assert ev.scope == "the code did not parse"
+    ev = budget.call("run", {"code": "a\x00b"}, time_s=30)
+    assert ev.scope == "the code did not parse"

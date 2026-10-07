@@ -69,29 +69,45 @@ class _Tee(io.StringIO):
         self._progress, self._last = progress, 0.0
         self._lock = threading.Lock()
         self._timer = None
+        self._closed = False
+
+    def _send_locked(self):
+        if self._closed:
+            return
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        self._last = time.monotonic()
+        self._progress({"result": {"stdout": self.getvalue(), "value": None},
+                        "method": "timed", "scope": "ran the given code; stopped before it finished"})
 
     def _send(self):
         with self._lock:
-            self._timer = None
-            self._last = time.monotonic()
-            self._progress({"result": {"stdout": self.getvalue(), "value": None},
-                            "method": "timed", "scope": "ran the given code; stopped before it finished"})
+            self._send_locked()
 
     def write(self, s):
         n = super().write(s)
-        if time.monotonic() - self._last > self._EVERY:
-            self._send()
-        elif self._timer is None:
-            t = threading.Timer(self._EVERY, self._send)
-            t.daemon = True
-            self._timer = t
-            t.start()
+        with self._lock:
+            if self._closed:
+                return n
+            if time.monotonic() - self._last > self._EVERY:
+                self._send_locked()
+            elif self._timer is None:
+                t = threading.Timer(self._EVERY, self._send)
+                t.daemon = True
+                self._timer = t
+                t.start()
         return n
 
     def close_stream(self):
-        t = self._timer
-        if t is not None:
-            t.cancel()
+        """Stop all progress sends; after this returns nothing more is sent from any thread."""
+        with self._lock:
+            self._closed = True
+            t, self._timer = self._timer, None
+            if t is not None:
+                t.cancel()
+        if t is not None and t is not threading.current_thread():
+            t.join(1.0)
 
 
 def run_code(code: str, progress=lambda p: None) -> tuple[str, object]:
@@ -106,14 +122,16 @@ def _execute(code, progress):
     last = None
     if tree.body and isinstance(tree.body[-1], ast.Expr):
         last = ast.Expression(tree.body.pop().value)
+    body_code = compile(tree, "<run>", "exec")
+    last_code = compile(last, "<run>", "eval") if last is not None else None
     out = _Tee(progress)
     ns = namespace()
     value, exc = None, None
     try:
         with contextlib.redirect_stdout(out):
-            exec(compile(tree, "<run>", "exec"), ns)
-            if last is not None:
-                value = eval(compile(last, "<run>", "eval"), ns)
+            exec(body_code, ns)
+            if last_code is not None:
+                value = eval(last_code, ns)
     except Exception as e:  # noqa: BLE001
         exc = e
     finally:
@@ -124,7 +142,7 @@ def _execute(code, progress):
 def _run(inp, ctx):
     try:
         stdout, value, exc = _execute(inp["code"], ctx.progress)
-    except SyntaxError as e:
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
         ev = Evidence(button="run", result=None, method="timed", scope="the code did not parse", complete=False)
         ev.flag("error", f"{type(e).__name__}: {e}")
         return ev
