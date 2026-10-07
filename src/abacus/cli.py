@@ -50,12 +50,12 @@ def _run_button(name: str, rest: list[str]) -> int:
         return _err(e.args[0])
     try:
         if a.input:
-            with open(a.input, encoding="utf-8") as f:
+            with open(a.input, encoding="utf-8-sig") as f:
                 text = f.read()
         else:
             text = a.json if a.json is not None else "{}"
         inp = json.loads(text)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:
         return _err(f"bad input: {e}")
     if not isinstance(inp, dict):
         return _err("bad input: the JSON must be an object")
@@ -69,9 +69,9 @@ def _run_file(rest: list[str]) -> int:
     _common(p)
     a = p.parse_args(rest)
     try:
-        with open(a.file, encoding="utf-8") as f:
+        with open(a.file, encoding="utf-8-sig") as f:
             code = f.read()
-    except OSError as e:
+    except (OSError, ValueError) as e:
         return _err(f"cannot read {a.file}: {e}")
     _emit(budget.call("run", {"code": code}, time_s=a.time), a.pretty, a.full)
     return 0

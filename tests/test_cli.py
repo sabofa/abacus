@@ -49,3 +49,19 @@ def test_run_file_subprocess(tmp_path):
     assert ev["button"] == "run" and ev["method"] == "timed" and ev["complete"] is True
     assert ev["result"]["stdout"].strip() == "4" and ev["result"]["value"] == 42
     assert ev["scope"] == "ran the given code once"
+
+
+def test_input_file_with_bom(tmp_path, capsys):
+    from tests import _budget_buttons  # noqa: F401
+    f = tmp_path / "in.json"
+    f.write_bytes(b"\xef\xbb\xbf{}")
+    assert main(["t_seeded", "--input", str(f)]) == 0
+
+
+def test_input_and_run_file_invalid_bytes_exit_2(tmp_path, capsys):
+    from tests import _budget_buttons  # noqa: F401
+    f = tmp_path / "bad.bin"
+    f.write_bytes(b"\xff\xfe\x00\xc3(")
+    assert main(["t_seeded", "--input", str(f)]) == 2
+    assert main(["run", str(f)]) == 2
+    assert "abacus:" in capsys.readouterr().err
