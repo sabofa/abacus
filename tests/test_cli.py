@@ -29,10 +29,9 @@ def test_missing_input_file_exits_2(capsys):
     assert main(["t_seeded", "--input", "no/such/file.json"]) == 2
 
 
-@pytest.mark.parametrize("stub", ["mint"])
-def test_stubs(stub, capsys):
-    assert main([stub]) == 2
-    assert "not built yet" in capsys.readouterr().out
+def test_mint_needs_a_subcommand(capsys):
+    assert main(["mint"]) == 2
+    assert "make" in capsys.readouterr().err
 
 
 def test_buttons_lists_run(capsys):

@@ -191,11 +191,6 @@ def test_index_needs_a_subcommand(lib, capsys):
     assert cli(capsys, "index")[0] == 2
 
 
-def test_stub_commands_left_are_not_built(capsys):
-    code, out, _ = cli(capsys, "mint")
-    assert code == 2 and "not built yet" in out
-
-
 # ---- the MCP buttons -------------------------------------------------------
 
 def call(name, inp):

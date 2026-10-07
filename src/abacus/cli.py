@@ -12,9 +12,9 @@ from . import budget, registry, sandbox  # noqa: F401  (sandbox registers the `r
 from .algo import roles as _roles, surface as _surface  # noqa: F401  (register the algo buttons)
 from .algo.loader import AlgoImportError
 from .library import surface as _library_surface  # noqa: F401  (register the library buttons)
+from .mint import surface as _mint_surface  # noqa: F401  (register the mint buttons)
 
-STUBS = ("mint",)
-COMMANDS = ("run", "mcp", "buttons", "algo", "link", "index") + STUBS
+COMMANDS = ("run", "mcp", "buttons", "algo", "link", "index", "mint")
 
 
 def button_names() -> list[str]:
@@ -322,6 +322,40 @@ def _index(rest: list[str]) -> int:
     return 0
 
 
+def _knob_value(text: str):
+    """A knob value from the command line: JSON when it parses (7, 1.5, true), else the text itself."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _mint(rest: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="abacus mint", description="Batches of generated problems.")
+    sub = p.add_subparsers(dest="sub", required=True)
+    mk = sub.add_parser("make", help="generate a batch from an algorithm; prints Evidence JSON")
+    mk.add_argument("algo", metavar="ALGO", help="a library id or an algorithm file")
+    mk.add_argument("--count", type=int, required=True, help="how many distinct instances to make")
+    mk.add_argument("--seed", type=int, required=True, help="the batch seed; the same seed and knobs make the same batch")
+    mk.add_argument("--knob", action="append", default=[], metavar="K=V", help="fix one of generate's knobs; repeatable")
+    _common(mk)
+    a, code = _parse(p, rest)
+    if a is None:
+        return code
+    knobs: dict = {}
+    for item in a.knob:
+        name, eq, value = item.partition("=")
+        if not (eq and name):
+            return _err(f"bad --knob {item!r}: use NAME=VALUE, such as --knob n=7")
+        knobs[name] = _knob_value(value)
+    inp = {"algo": a.algo, "count": a.count, "seed": a.seed}
+    if knobs:
+        inp["knobs"] = knobs
+    ev = budget.call("mint_make", inp, time_s=a.time)
+    _emit(ev, a.pretty, a.full)
+    return 0 if ev.result is not None else 2  # nothing was written
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
@@ -343,9 +377,8 @@ def main(argv=None) -> int:
         return _link(rest)
     if cmd == "index":
         return _index(rest)
-    if cmd in STUBS:
-        print(f"abacus {cmd}: not built yet")
-        return 2
+    if cmd == "mint":
+        return _mint(rest)
     if cmd == "run":
         return _run_file(rest)
     return _run_button(cmd, rest)
