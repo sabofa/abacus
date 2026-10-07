@@ -330,6 +330,56 @@ def _knob_value(text: str):
         return text
 
 
+_EXPORT_TARGETS = ("osmosis",)  # the targets of `mint export`; abacus.mint.export.TARGETS, without importing it here
+
+
+def _index_list(values: list[str], flag: str) -> list[int]:
+    """`--drop 3,17 --drop 20` as [3, 17, 20]. ValueError for anything that is not a whole number."""
+    out = []
+    for item in values:
+        for part in item.split(","):
+            try:
+                out.append(int(part))
+            except ValueError:
+                raise ValueError(f"bad {flag} {item!r}: use instance indexes, such as {flag} 3,17") from None
+    return out
+
+
+def _mint_review(a) -> int:
+    try:
+        drop, keep = _index_list(a.drop, "--drop"), _index_list(a.keep, "--keep")
+        notes = {}
+        for index, text in a.note:
+            try:
+                notes[int(index)] = text
+            except ValueError:
+                raise ValueError(f"bad --note {index!r}: the first value is an instance index, "
+                                 "as in --note 5 \"too easy\"") from None
+    except ValueError as e:
+        return _err(str(e))
+    inp: dict = {"batch": a.batch}
+    if drop:
+        inp["drop"] = drop
+    if keep:
+        inp["keep"] = keep
+    if notes:
+        inp["notes"] = {str(i): t for i, t in notes.items()}  # JSON keys are text
+    ev = budget.call("mint_review", inp, time_s=a.time)
+    _emit(ev, a.pretty, a.full)
+    return 0 if ev.result is not None else 2  # nothing was written
+
+
+def _mint_export(a) -> int:
+    inp: dict = {"batch": a.batch, "to": a.to, "tags": [t.strip() for t in a.tags.split(",")]}
+    if a.node_key:
+        inp["node_keys"] = a.node_key
+    if a.family is not None:
+        inp["family_id"] = a.family
+    ev = budget.call("mint_export", inp, time_s=a.time)
+    _emit(ev, a.pretty, a.full)
+    return 0 if ev.result is not None else 2  # no payload was written
+
+
 def _mint(rest: list[str]) -> int:
     p = argparse.ArgumentParser(prog="abacus mint", description="Batches of generated problems.")
     sub = p.add_subparsers(dest="sub", required=True)
@@ -339,9 +389,27 @@ def _mint(rest: list[str]) -> int:
     mk.add_argument("--seed", type=int, required=True, help="the batch seed; the same seed and knobs make the same batch")
     mk.add_argument("--knob", action="append", default=[], metavar="K=V", help="fix one of generate's knobs; repeatable")
     _common(mk)
+    rv = sub.add_parser("review", help="record keep/drop decisions and notes in a batch; prints Evidence JSON")
+    rv.add_argument("batch", metavar="BATCH", help="a batch id or a batch file")
+    rv.add_argument("--drop", action="append", default=[], metavar="N,N", help="instance indexes to drop; repeatable")
+    rv.add_argument("--keep", action="append", default=[], metavar="N,N", help="instance indexes to keep; repeatable")
+    rv.add_argument("--note", action="append", nargs=2, default=[], metavar=("INDEX", "TEXT"),
+                    help="a note on one instance; repeatable")
+    _common(rv)
+    ex = sub.add_parser("export", help="write a batch's kept instances as a consumer's payload; prints Evidence JSON")
+    ex.add_argument("batch", metavar="BATCH", help="a batch id or a batch file")
+    ex.add_argument("--to", choices=_EXPORT_TARGETS, default="osmosis", help="the consumer (default osmosis)")
+    ex.add_argument("--tags", required=True, metavar="T1,T2", help="the tags for every question; they must already exist")
+    ex.add_argument("--node-key", action="append", default=[], metavar="KEY", help="a node key (node:...); repeatable")
+    ex.add_argument("--family", default=None, metavar="FAMILY_ID", help="add this family_id to every question, for pools")
+    _common(ex)
     a, code = _parse(p, rest)
     if a is None:
         return code
+    if a.sub == "review":
+        return _mint_review(a)
+    if a.sub == "export":
+        return _mint_export(a)
     knobs: dict = {}
     for item in a.knob:
         name, eq, value = item.partition("=")
