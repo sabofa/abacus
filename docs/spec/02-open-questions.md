@@ -5,7 +5,8 @@ Numbered. Closed questions stay in the list, marked with their answer.
 ---
 
 1. **Difficulty.**
-   - **Open:**
+   - **Moved into spec 3 (Ben, 2026-10-07):** a well-researched, multi-variable score, not a single number out of 100. Claude researches and decides. The research is in `create/01-research-findings.md` §3. The design is still to come.
+   - **Was open:**
      - Which scale? Candidates:
        - contest positions: AMC 12 #1–25, AIME #1–15, quant tiers
        - the AoPS 1–10 scale

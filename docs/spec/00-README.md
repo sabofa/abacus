@@ -19,7 +19,7 @@ Ben's context is a math major, AMC 12 and AIME, and the quant track (Learn `trac
 |---|---|---|---|
 | 1. Help the AI check its own answers | **Kit**: the Python package, 14 buttons and a sandbox, the algorithm format, the library of algorithms and its links, minting batches into Osmosis | [`kit/`](kit/00-README.md) | spec'd, draft |
 | (builds on 1) | **Live**: a fresh instance every time a question comes up, pools, per-family scheduling, demos | [`live/`](live/00-README.md) | spec'd, draft |
-| 2. Help the AI come up with original problems | **Create**: how the AI invents problems using the kit | — | **next; not written** |
+| 2. Help the AI come up with original problems | **Create**: how the AI invents problems using the kit; it also takes over difficulty (Ben, 2026-10-07) | [`create/`](create/00-README.md) | **brainstorming**: Ben's answers and the research are in; approaches next |
 
 **Difficulty is deliberately left open.** That covers how hard a problem is, on what scale, and whether it is predicted or observed. It is its own boundary ([`02-open-questions.md`](02-open-questions.md) #1). The kit only records measured signals ([`kit/08-signals.md`](kit/08-signals.md)).
 
@@ -32,6 +32,7 @@ Ben's context is a math major, AMC 12 and AIME, and the quant track (Learn `trac
 | [`02-open-questions.md`](02-open-questions.md) | what's undecided, and who decides it | yes |
 | [`kit/`](kit/00-README.md) | spec 1 | draft, for Ben's review |
 | [`live/`](live/00-README.md) | spec 2, including `handoff-osmosis.md` | draft, for Ben's review |
+| [`create/`](create/00-README.md) | spec 3, brainstorming: Ben's answers, research findings, open questions | not a spec yet |
 
 ## Relationships
 

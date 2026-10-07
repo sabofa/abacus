@@ -152,6 +152,8 @@ High-precision numerics.
 
 ### 12. `construct`
 Build a figure by construction and measure it.
+
+**Status (2026-10-07):** not in the first build. It waits on spec 3's geometry design. Ben put geometry in scope, and the research suggests adding an algebraic prover (Wu / Gröbner) and drawing diagrams from solved coordinates (`../create/01-research-findings.md` §4).
 - **Input:**
   - `steps`: construction statements, one per line.
     - Free points take coordinates, or `random` (for testing generality).

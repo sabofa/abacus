@@ -35,6 +35,7 @@ META = {
 
 - **`tags` and `techniques`** are free-form slugs for the library index. An adapter may map them to a consumer's vocabulary (such as Osmosis tags) at export.
 - **Answer formats:** `integer`, `rational`, `expression` (compared with sympy), `choice` (A–E), `tuple`, `set`, `text`. `range` is optional; AIME is `[0, 999]`.
+- **`knobs` may be empty.** An algorithm with `generate` and no knobs is a **one-off**: one fixed problem, still stored, linked and checkable like any other (Ben, 2026-10-07: one-offs allowed).
 - **`pattern_knob: true`** marks an integer knob along which small cases are meaningful. The `small_case_pattern` signal uses it (`08`).
 
 ## 3. Roles
@@ -77,7 +78,9 @@ META = {
 - **`signals`** is filled in by minting (`08`).
 - **`solution`** and **`demo`** hold the rendered outputs of those roles, when present.
 
-## 5. Solutions (show-your-work): a stretch goal
+## 5. Solutions (show-your-work): deferred
+
+**Deferred (Ben, 2026-10-07: no step-by-step solutions for now).** The `solution` role name stays reserved in the format, but it isn't built. The design below is kept for when it returns.
 
 `solution` returns an ordered list of steps. Each step is a text template plus the values it cites, and **those values are computed in the algorithm from the instance**:
 

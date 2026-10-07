@@ -55,7 +55,7 @@ Each kept instance becomes one `create_questions` item:
 | `prompt` | `statement` |
 | `choices` | `choices`: `body`, `is_correct` ← `correct`, `misconception` ← `note` |
 | `model_answer` | the answer rendered as text (written items only) |
-| `explanation` | the rendered `solution`, if there is one |
+| `explanation` | not set while `solution` is deferred (`05` §5) |
 | `tags`, `node_keys` | from the export command; they must already exist in Osmosis. In v1, abacus tags are not mapped automatically |
 | `source_note` | `abacus <algo>@<hash> seed <seed>`. A hint people can see, shown in Osmosis's question detail |
 | `difficulty` | not set (open question 1) |

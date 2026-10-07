@@ -1,6 +1,7 @@
 # 08 — Signals
 
 **Owns:** the measured, non-subjective facts recorded about each instance, for a future difficulty model.
+**Status (2026-10-07):** on hold. Ben moved difficulty into spec 3 ("create") as a researched, multi-variable score. These signals will be revised to fit that design, and they aren't built until then. Minting keeps a no-op signals step in their place.
 **Defers to:** open question 1, which covers the scale, the prediction, the observed rating, and any score. **The kit computes no difficulty score and no band.**
 
 ---
