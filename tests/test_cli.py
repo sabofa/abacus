@@ -28,7 +28,7 @@ def test_missing_input_file_exits_2(capsys):
     assert main(["t_seeded", "--input", "no/such/file.json"]) == 2
 
 
-@pytest.mark.parametrize("stub", ["algo", "link", "mint", "index"])
+@pytest.mark.parametrize("stub", ["link", "mint", "index"])
 def test_stubs(stub, capsys):
     assert main([stub]) == 2
     assert "not built yet" in capsys.readouterr().out
@@ -65,3 +65,48 @@ def test_input_and_run_file_invalid_bytes_exit_2(tmp_path, capsys):
     assert main(["t_seeded", "--input", str(f)]) == 2
     assert main(["run", str(f)]) == 2
     assert "abacus:" in capsys.readouterr().err
+
+
+ALGO = "tests/fixtures/algos/nt_power_mod.py"
+
+
+def test_algo_new(tmp_path, capsys):
+    assert main(["algo", "new", "demo.add", "--out", str(tmp_path)]) == 0
+    f = tmp_path / "demo_add.py"
+    assert f.is_file() and str(f) in capsys.readouterr().out
+    assert main(["algo", "new", "demo.add", "--out", str(tmp_path)]) == 2  # no overwrite
+    assert main(["algo", "new", "Bad Id", "--out", str(tmp_path)]) == 2
+    from abacus.algo.lint import lint
+    assert all(c["status"] == "ok" for c in lint(f, k=3).result["checks"])
+
+
+def test_algo_lint(capsys):
+    assert main(["algo", "lint", ALGO, "-k", "2"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["button"] == "algo_lint"
+    assert [c["check"] for c in out["result"]["checks"]][0] == "header"
+
+
+def test_algo_show(capsys):
+    assert main(["algo", "show", ALGO]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["meta"]["id"] == "nt.power-mod" and len(out["hash"]) == 8
+    assert main(["algo", "show", "no/such.py"]) == 2
+
+
+def test_algo_list(capsys, tmp_path):
+    assert main(["algo", "list", "tests/fixtures/algos"]) == 0
+    out = capsys.readouterr().out
+    assert "nt.power-mod	a to the b mod m	" in out
+    assert main(["algo", "list", str(tmp_path / "missing")]) == 0
+    assert "no algorithm directory" in capsys.readouterr().out
+
+
+def test_algo_run(capsys):
+    args = json.dumps({"params": {"a": 3, "b": 4, "m": 5}})
+    assert main(["algo", "run", ALGO, "compute", "--args", args]) == 0
+    assert json.loads(capsys.readouterr().out)["result"] == 1
+    assert main(["algo", "run", ALGO, "generate", "--seed", "7", "--knobs", '{"m": 9}']) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["seed"] == 7 and out["result"]["params"]["m"] == 9
+    assert main(["algo", "run", ALGO, "compute", "--args", "[1]"]) == 2
