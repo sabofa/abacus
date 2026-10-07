@@ -10,8 +10,8 @@
 |---|---|---|---|
 | T1 Foundation | [x] | f7555a4 c5833dd a4e8c1e; fixes in 93d40ce, 76ae73b | READY after 2 rounds (Sonnet) |
 | T2 Surfaces | [x] | 93d40ce c4e2f5b a030c95; fixes bf16f47, f92e19f | 2 rounds (Sonnet); round 2 (the thread-safe flush) has a deterministic test but no re-review: the cap was reached |
-| T3 Buttons: arithmetic and algebra | [~] built (8c6e573); review round 1 NOT READY (1 critical: parser string-eval hole, 3 important); fixer running | 8c6e573 | |
-| T4 Buttons: counting and discrete math | [~] built (a9790c2); review running | a9790c2 | |
+| T3 Buttons: arithmetic and algebra | [~] round 1 fix fda71bc; hardening fixer running (a07f677d…); needs a final non-adversarial re-review | 8c6e573; fda71bc | Round 1 NOT READY (1 critical: parser string-eval hole). Re-review was cut short by a safety classifier before finishing; it found: `exact` returned Python objects via attribute access, `evidence._equal` sympified raw strings, identity `vars` unvalidated. All three went to the hardening fixer |
+| T4 Buttons: counting and discrete math | [~] round 1 fix 6697a1b; re-review running | a9790c2; 6697a1b | Round 1 NOT READY (3 important: margin error skipped the claim; silent caps; thin holdout) |
 | T5 Buttons: probability and quant | [ ] | | |
 | T6 Buttons: continuous math | [ ] | | |
 | T7 Buttons: CS | [ ] | | |
@@ -69,3 +69,6 @@ Everything not blocked is built and reviewed: T1, T2, T8, T9, T10.1, T10.2. Full
 Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both wait on Ben's B1.
 - T3 review minors (logged): Domain.sample float-bound edge (~5e-18 outside); finite integer domains stay `unknown` after exhaustive agreement.
 - B1 answered 2026-10-07: keep all 14 buttons (T3–T7 + T10.3 unblocked; construct waits on spec 3). B2: no Lean/prover for now. B3: one-time expert rating of 10–20 problems (rating sheet still to prepare). B4: OEIS off. B5: Osmosis keeps tech:, abacus uses technique:.
+- T4 round-1 minors (logged): DESCRIPTION strings don't mention the new result keys (capped, unlisted_unsupported, margin_errors, capped_at_k).
+- A test in tests/test_kit_algebra.py (test_exact_mod_of_a_huge_power_finishes_without_building_it) failed once during the T4 fixer's full run, while the T3 hardening fixer was mid-edit. Re-check when the hardening commit lands.
+- A safety classifier cut short a hostile-payload review of the parser. Don't re-run payload-hunting reviews; use defensive code review and ordinary tests.
