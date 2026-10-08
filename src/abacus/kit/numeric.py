@@ -323,15 +323,15 @@ def _op_integral(inp, ctx, digits):
                         ["an integral over an infinite range is reported only when the integrand is seen to be "
                          "negligible at the edge of the sampled reach"])
         notes.append(f"infinite-range result covers the sampled reach only: integrand sampled out to |x| <= {REACH:.0e}; "
-                     f"mass beyond that cannot be ruled out")
+                     f"mass beyond that, or in a narrow peak between the sampled points, cannot be ruled out")
         notes.append("an infinite range is mapped to a finite one by mpmath's tanh-sinh scheme and computed twice on "
                      "different splits; the error is the larger of mpmath's estimate and the disagreement of the two "
                      "runs, an estimate and not a bound")
     scope = (f"mpmath tanh-sinh quadrature of {inp['expr']} over [{inp['lo']}, {inp['hi']}] at {digits + GUARD} "
              f"working digits ({f.calls} evaluations)")
     if infinite:
-        scope += (f"; integrand sampled out to |x| <= {REACH:.0e}, and mass beyond that cannot be ruled out "
-                  f"(an infinite-range result covers the sampled reach only)")
+        scope += (f"; integrand sampled out to |x| <= {REACH:.0e}; mass beyond that, or in a narrow peak between the "
+                  f"sampled points, cannot be ruled out (an infinite-range result covers the sampled reach only)")
     return _Out([val], [err], scope=scope, notes=notes)
 
 
@@ -438,7 +438,85 @@ def _slow_sum(g, start, p, digits):
                      f"default extrapolation is unreliable here and was not used"],         [("slow_convergence", "the series converges slowly; its sum is an Euler-Maclaurin estimate")]
 
 
+SUM_DENSE = 100          # an infinite sum is probed at every one of its first SUM_DENSE + 1 indices, then on a log grid
+
+
+def _sum_probe(g, start):
+    """Probe the terms of an infinite sum at start + j for j = 0..SUM_DENSE and then eight points per decade out to
+    REACH. Returns (largest |term| seen anywhere probed, largest |term| at j >= 1e7, |term| at j = REACH, largest
+    |term| at 1e7 <= j < REACH). Points where the term cannot be evaluated are skipped."""
+    js = list(range(SUM_DENSE + 1))
+    js += sorted({int(round(10 ** (k / 8))) for k in range(17, 65)} - set(js))   # about 133 ... 10^8
+    best, outer, last, before = mp.mpf(0), mp.mpf(0), mp.mpf(0), mp.mpf(0)
+    for j in js:
+        try:
+            v = abs(g(mp.mpf(start + j)))
+        except (ZeroDivisionError, ValueError, ArithmeticError, TypeError):
+            continue
+        best = max(best, v)
+        if j >= 10 ** 7:
+            outer = max(outer, v)
+            if j >= REACH:
+                last = v
+            else:
+                before = max(before, v)
+    return best, outer, last, before
+
+
+def _check_sum_reach(f, g, start, val, digits, text):
+    """The sum counterpart of the integral's reach check. A series whose terms are negligible everywhere the summation
+    looked can still have mass far out (exp(-(n-5000)**2) sums to sqrt(pi) and extrapolates to 0), and one whose terms
+    are still large at the edge of the probed reach cannot be known to converge. Raise _Fail in either case."""
+    seen = f.seen   # what the summation itself evaluated, before the probes
+    top, outer, last, before = _sum_probe(g, start)
+    top = max(top, seen)
+    thr = mp.mpf(10) ** -(digits + GUARD)
+    cannot = (f"the terms were sampled out to n - {start} <= {REACH:.0e}; mass beyond that, or in a narrow peak "
+              f"between the sampled points, cannot be ruled out")
+    blind = top > thr and seen * 1000 < top
+    if top <= thr or blind:
+        raise _Fail("no_mass_observed",
+                    "the infinite sum cannot be confirmed: "
+                    + (f"the probes found a term as large as {mp.nstr(top, 3)} where the summation saw at most "
+                       f"{mp.nstr(seen, 3)}, so it missed the mass" if blind else
+                       f"the terms are zero or negligible (at most {mp.nstr(top, 3)}) everywhere they were sampled")
+                    + f", and the computed value ({mp.nstr(val, 3)}) says nothing about a bump the sampling missed",
+                    f"infinite sum of {text}: no value reported. {cannot}. Nothing non-negligible was seen by the "
+                    f"summation, so the mass may lie outside the sampled region",
+                    ["the summation and a probe grid (every index near the start, then a log-spaced grid) all saw "
+                     "negligible terms, or the summation saw far less than the probes; a bump far from the start "
+                     "(such as exp(-(n-5000)**2)) is invisible to the extrapolation, which returns 0 with a clean "
+                     "error estimate; nothing is reported rather than that"])
+    # a convergent tail shrinks at least like 1/n, i.e. by a factor of 10 or more per decade; terms that stay large
+    # and shrink more slowly at the edge of the reach are not known to be summable
+    if outer > top * mp.mpf(DECAY_RATIO) and last > before * mp.mpf("0.1"):
+        raise _Fail("unconfirmed_decay",
+                    f"the infinite sum cannot be confirmed: the terms are still {mp.nstr(outer, 3)} at the outermost "
+                    f"sampled indices (n - {start} up to {REACH:.0e}) against {mp.nstr(top, 3)} at their largest, "
+                    f"and are not shrinking fast enough there to be known to converge",
+                    f"infinite sum of {text}: no value reported. {cannot}. The terms were not negligible at the "
+                    f"outermost sampled indices",
+                    ["an infinite sum is reported only when its terms are seen to be negligible, or to be shrinking "
+                     "at least like 1/n, at the edge of the sampled reach"])
+
+
 def _inf_sum(f, lo, hi, digits, ctx, product=False, text=""):
+    """(value, error estimate, notes, flags) of an infinite sum or product, checked several ways. Raises _Fail when
+    the series does not clearly converge, the checks do not agree, or (for a sum) its mass may lie outside the
+    sampled reach."""
+    one_sided = (hi == mp.inf) != (lo == -mp.inf)
+    out = _inf_sum_checked(f, lo, hi, digits, ctx, product, text)
+    if product or not one_sided:   # a two-sided sum is split into two one-sided ones, each checked on its own
+        return out
+    g, start = (f, int(lo)) if hi == mp.inf else ((lambda k: f(-k)), -int(hi))
+    _check_sum_reach(f, g, start, out[0], digits, text)
+    notes = out[2] + [f"infinite-sum result covers the sampled reach only: terms sampled out to n - {start} <= "
+                      f"{REACH:.0e}; mass beyond that, or in a narrow peak between the sampled points, cannot be "
+                      f"ruled out"]
+    return out[0], out[1], notes, out[3]
+
+
+def _inf_sum_checked(f, lo, hi, digits, ctx, product=False, text=""):
     """(value, error estimate, notes, flags) of an infinite sum or product, checked several ways. Raises _Fail when
     the series does not clearly converge or the checks do not agree."""
     run = mp.nprod if product else mp.nsum
@@ -458,6 +536,7 @@ def _inf_sum(f, lo, hi, digits, ctx, product=False, text=""):
     # 1. The terms must head to zero, and fast enough. Extrapolation applied to a divergent series returns a
     #    confident number (sum 1/n gives 6.7, sum 1 gives 450, sum 2^n gives -1), so this comes first.
     p, alt = _check_terms(g, start, product, name, text)
+    f.seen = mp.mpf(0)   # from here on, what the summation itself evaluates (the checks above looked far out)
     if not product and not alt and p < 1 + (digits + 5) / 40:
         return _slow_sum(g, start, p, digits)
     plain = run(g, [start, mp.inf])
@@ -537,6 +616,9 @@ def _op_series(inp, ctx, digits, product):
                  f"disagreement between two runs), not a bound")
     scope = (f"mpmath {'nprod' if product else 'nsum'} of {inp['expr']} for {v} = {inp['lo']}..{inp['hi']}, "
              f"checked against a run that starts {SHIFT} terms later, at {digits + GUARD} working digits")
+    if not product:
+        scope += (f"; terms sampled out to n - start <= {REACH:.0e}; mass beyond that, or in a narrow peak between the "
+                  f"sampled points, cannot be ruled out (an infinite-sum result covers the sampled reach only)")
     return _Out([val], [err], scope=scope, notes=notes, flags=flags)
 
 
@@ -775,8 +857,10 @@ def _fmt(v, n: int) -> str:
                 "y(t0) = y0, evaluated at `at`). Returns the value with its digits and an error estimate, and "
                 "notes when convergence is slow or the estimate is large (then fewer digits are shown). "
                 "The estimate is a self-check, not a proof. An infinite-range integral covers the sampled reach only "
-                "(the integrand is probed out to |x| <= 1e8): it is reported without a value, flagged "
-                "no_mass_observed or unconfirmed_decay, when the mass may lie outside that reach.",
+                "(the integrand is probed out to |x| <= 1e8; mass beyond that, or in a narrow peak between the sampled "
+                "points, cannot be ruled out): it is reported without a value, flagged no_mass_observed or "
+                "unconfirmed_decay, when the mass may lie outside that reach. An infinite sum is treated the same "
+                "way (its terms are probed out to n - start <= 1e8).",
     input_schema=_SCHEMA,
 )
 def numeric(inp: dict, ctx) -> Evidence:

@@ -384,6 +384,17 @@ def test_answer_key_of_a_pathological_answer_is_the_text_and_is_quick(fmt, value
     assert key == _key(fmt, value) and hash(key) == hash(key)
 
 
+@pytest.mark.parametrize("text", ["x^2y^3", "x^2 y^3", "time10000", "mode12345", "a**2b**3"])
+def test_costly_does_not_match_ordinary_text(text):
+    assert not mk._costly(text), text
+
+
+@pytest.mark.parametrize("text", ["1e9999999", "1E+99999", "2.5e-12345", "1e9_999_999", "9**9**9", "9^9^9",
+                                  "9**(9**9)", "x**99999999"])
+def test_costly_still_matches_the_pathological_ones(text):
+    assert mk._costly(text), text
+
+
 def test_answer_key_still_reads_the_ordinary_answers_next_to_the_pathological_ones():
     assert _key("integer", "1e5") == _key("integer", 100000)
     assert _key("expression", "x**2 + y**2") == _key("expression", "y**2 + x**2")

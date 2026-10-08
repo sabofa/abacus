@@ -81,9 +81,9 @@ def _canon(x: Any) -> str:
 MAX_KEY_CHARS = 200
 _POW = r"(?:\*\*|\^)"
 _COSTLY = re.compile(
-    r"[eE][+-]?[\d_]{5,}"                      # 1e9999999, 1e-9999999, 1e9_999_999
+    r"(?<=[\d.])[eE][+-]?[\d_]{5,}"             # 1e9999999, 1e-9999999, 1e9_999_999 (e after a digit; not time10000)
     rf"|{_POW}\s*[+-]?\s*\(?\s*[\d_]{{5,}}"       # x**99999999, 2**(99999999
-    rf"|{_POW}\s*[\w.]+\s*{_POW}"               # 9**9**9: a tower with a bare exponent
+    rf"|{_POW}\s*(?:[\d.]+|[A-Za-z_]\w*)\s*{_POW}"   # 9**9**9: a tower with a bare exponent (not x^2y^3)
     rf"|{_POW}\s*\([^()]*{_POW}"                # 9**(9**9): a power in a parenthesised exponent
 )
 

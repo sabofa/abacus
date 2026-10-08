@@ -4,3 +4,5 @@ __pycache__/
 library/.index.sqlite
 library/usage.jsonl
 *.egg-info/
+.hypothesis/
+library/batches/

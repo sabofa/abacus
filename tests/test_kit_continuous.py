@@ -740,3 +740,72 @@ def test_numeric_infinite_integral_not_known_to_decay_in_the_reach_is_withheld()
     assert _value(ev) is None and ev.complete is False
     assert (ev.result or {}).get("reliable_digits", 0) == 0
     assert set(codes(ev)) & {"unconfirmed_decay", "no_convergence"}, ev.flags
+
+
+# ---------------------------------------------------------------- infinite sums: mass outside the sampled reach
+
+
+@pytest.mark.parametrize("expr", [
+    "exp(-(n - 5000)**2)",          # sqrt(pi)
+    "exp(-(n - 100)**2/20)",        # about 7.9
+    "exp(-(n - 200)**2/20)",
+    "exp(-(n - 1000)**2/20)",
+])
+def test_numeric_infinite_sum_with_mass_outside_the_sampled_reach_is_withheld(expr):
+    # all four were reported as 0, complete, with no flag
+    ev = run("numeric", op="sum", expr=expr, var="n", lo="0", hi="oo", digits=20)
+    assert _value(ev) is None, ev.result
+    assert ev.complete is False
+    assert (ev.result or {}).get("reliable_digits", 0) == 0
+    assert "error_estimate" not in (ev.result or {}) and (ev.precision or {}).get("digits", 0) == 0
+    assert set(codes(ev)) & {"no_mass_observed", "unconfirmed_decay"}, ev.flags
+    assert "sampled" in ev.scope and "cannot be ruled out" in ev.scope
+
+
+def test_numeric_infinite_sum_not_negligible_near_the_edge_of_the_reach_is_withheld():
+    # terms of size ~1 out to n ~ 1e8: they pass the divergence check at 1e9 yet are not seen to decay in the reach
+    ev = run("numeric", op="sum", expr="exp(-(n/10**8)**2)", var="n", lo="0", hi="oo", digits=20)
+    assert _value(ev) is None and ev.complete is False
+    assert (ev.result or {}).get("reliable_digits", 0) == 0
+    assert set(codes(ev)) & {"unconfirmed_decay", "no_convergence", "divergent"}, ev.flags
+
+
+@pytest.mark.parametrize("expr,lo,true", [
+    ("exp(-(n - 20)**2/20)", "0", lambda: sum(mp.exp(-(mp.mpf(k) - 20) ** 2 / 20) for k in range(0, 400))),
+    ("1/n**2", "1", lambda: mp.pi ** 2 / 6),
+    ("1/n**3", "1", lambda: mp.zeta(3)),
+    ("1/n**4", "1", lambda: mp.pi ** 4 / 90),
+    ("(-1)**n/n", "1", lambda: -mp.log(2)),
+    ("n/2**n", "0", lambda: mp.mpf(2)),
+    ("n**2/3**n", "0", lambda: mp.mpf(3) / 2),
+    ("1/(n**2 + 1)", "0", lambda: (1 + mp.pi * mp.coth(mp.pi)) / 2),
+    ("1/n**1.5", "1", lambda: mp.zeta(mp.mpf(3) / 2)),
+    ("1/n**2", "1000", lambda: mp.zeta(2) - sum(1 / mp.mpf(k) ** 2 for k in range(1, 1000))),
+    ("1/n**(11/10)", "1", lambda: mp.zeta(mp.mpf(11) / 10)),
+    ("1/n**(11/10)", "1000", lambda: mp.zeta(mp.mpf(11) / 10) - sum(1 / mp.mpf(k) ** mp.mpf("1.1") for k in range(1, 1000))),
+])
+def test_numeric_infinite_sums_inside_the_reach_still_compute_and_state_the_reach(expr, lo, true):
+    ev = run("numeric", op="sum", expr=expr, var="n", lo=lo, hi="oo", digits=15)
+    assert ev.complete is True and not ({"divergent", "no_convergence", "no_mass_observed", "unconfirmed_decay"}
+                                        & set(codes(ev))), (ev.flags, ev.result)
+    assert ev.result["reliable_digits"] >= 12, ev.result
+    with mp.workdps(60):
+        t = true()
+        assert abs(mpv(ev, 60) - t) <= abs(t) * mp.mpf(10) ** -12
+    assert "n - " in ev.scope and "cannot be ruled out" in ev.scope
+    assert "sampled reach only" in notes(ev)
+
+
+def test_numeric_the_reach_wording_names_peaks_between_the_sampled_points():
+    ev = run("numeric", op="integral", expr="exp(-x**2)", var="x", lo="-oo", hi="oo", digits=15)
+    assert "mass beyond that, or in a narrow peak between the sampled points, cannot be ruled out" in ev.scope
+    assert "narrow peak between the sampled points" in notes(ev)
+    ev = run("numeric", op="sum", expr="1/n**2", var="n", lo="1", hi="oo", digits=15)
+    assert "mass beyond that, or in a narrow peak between the sampled points, cannot be ruled out" in ev.scope
+    assert "narrow peak between the sampled points" in notes(ev)
+
+
+def test_numeric_description_names_the_known_limitation():
+    registry.load_all()
+    desc = registry.get("numeric").description if hasattr(registry, "get") else ""
+    assert "narrow peak between the sampled points" in desc
