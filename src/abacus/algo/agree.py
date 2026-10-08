@@ -10,16 +10,16 @@ from typing import Any
 
 
 def check_agrees(ev: Any) -> bool | None:
-    """True when `compare.equal` is True, else when `compare.consistent` is True, else the `result` when it
-    is a bool. Otherwise False if `compare` said `equal` or `consistent` was False, and None (no verdict)
-    when it said neither."""
+    """True when `compare.equal` is True, else when `compare.consistent` is True. Otherwise False when `compare`
+    says either one is False (a comparison that says "not equal" is not overruled by a bool result). With
+    neither in `compare`, the `result` when it is a bool; None (no verdict) when there is nothing to read."""
     cmp = getattr(ev, "compare", None)
     cmp = cmp if isinstance(cmp, dict) else {}
     if cmp.get("equal") is True or cmp.get("consistent") is True:
         return True
+    if cmp.get("equal") is False or cmp.get("consistent") is False:
+        return False
     result = getattr(ev, "result", None)
     if isinstance(result, bool):
         return result
-    if cmp.get("equal") is False or cmp.get("consistent") is False:
-        return False
     return None

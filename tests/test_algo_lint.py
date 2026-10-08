@@ -272,7 +272,8 @@ def test_check_agrees_reads_equal_then_consistent_then_the_result():
 
     assert check_agrees(ev(0.5, {"equal": True})) is True
     assert check_agrees(ev(0.5, {"equal": False, "consistent": True})) is True
-    assert check_agrees(ev(True, {"equal": False})) is True  # the result bool, when compare does not say yes
+    assert check_agrees(ev(True, {"equal": False})) is False  # an explicit "not equal" is not overruled by a bool result
+    assert check_agrees(ev(True, {"z": 1.0})) is True  # no verdict in compare: the result bool decides
     assert check_agrees(ev(False, {"equal": False, "consistent": False})) is False
     assert check_agrees(ev(0.5, {"equal": False, "consistent": False})) is False
     assert check_agrees(ev(0.5, {"equal": False})) is False
