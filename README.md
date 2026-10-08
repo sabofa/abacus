@@ -4,7 +4,15 @@ A math toolkit for AI: a calculator it reaches for when it wants to.
 
 It computes what thinking alone can't do reliably: brute-force counting, simulation, exact arithmetic, turning decimals into closed forms, testing identities, measuring geometry by construction, and comparing a clever solution against a brute-force one. It never tells the AI whether it is right. Every result is evidence, and says exactly what it covered.
 
-**Status:** spec'd, not built.
+**Status (2026-10-07):** the first kit build is merged: 13 of the 14 buttons (`construct` waits on the geometry design), the algorithm format, library and minting. `abacus --help` lists the commands; `abacus mcp` serves them over MCP.
+
+```
+python -m venv .venv
+.venv\Scripts\python -m pip install -e .[dev]     # Windows; use .venv/bin/python elsewhere
+.venv\Scripts\python -m pytest -q -p no:cacheprovider
+```
+
+Known limits are stated in the results themselves (every result says what it covered). Open items and the build record are in `.superpowers/sdd/kit-build/`.
 
 ## Spec
 
