@@ -28,6 +28,9 @@ DEFAULT_EXAMPLES = 500
 EDGE_CAP = 200          # boundary inputs tried before the generated ones
 COMBO_CAP = 64          # boundary combinations kept per tuple / dict of strategies
 SHOWN_CHARS = 2000      # an output or input longer than this is cut when shown
+REPORT_EVERY = 10       # progress is also sent every this many inputs (and at least every 0.2 s) ...
+REPORT_FIRST = 50       # ... and before each of the first inputs, so a function that hangs early is named
+DIFF_TYPES = "both_raised_different_types"
 
 DESCRIPTION = (
     "Run two implementations on generated inputs and report where they disagree. fast and reference are code: a "
@@ -41,8 +44,14 @@ DESCRIPTION = (
     "examples is how many inputs to run (default 500). edge (default true) first tries boundary values: 0, 1, -1, "
     "the ends of bounded ranges, empty lists, and so on. Seeded. Each kind of disagreement (the values differ; one "
     "side raised) is shrunk to a minimal input and shown with both outputs, at most max_examples kinds. Outputs are "
-    "compared as make_compare does (1/2 and 0.5, tuple and list, set order). If only one raises, that is a "
-    "disagreement. Agreement on the inputs that ran is not proof."
+    "compared as make_compare does (1/2 and 0.5, tuple and list, set order), except that numbers are compared "
+    "exactly: 0.1+0.2 and 0.3 disagree unless rtol or atol (default 0, applied to floats, also inside lists, tuples "
+    "and dicts but not sets) says otherwise; the scope states the rule used. If only one raises, that is a "
+    "disagreement; if both raise, the exception types are compared: the same type is agreement (counted as "
+    "both_raised), different types a disagreement (kind both_raised_different_types). Hypothesis shrinks and the "
+    "time budget may cut shrinking short: the scope says which kinds are shown shrunk. Agreement on the inputs that "
+    "ran is not proof. The inputs spec and fast and reference are Python code that is executed, not sandboxed: the "
+    "trimmed builtins in the inputs namespace keep it tidy, they are not a security boundary."
 )
 
 SCHEMA = {
@@ -53,6 +62,8 @@ SCHEMA = {
         "inputs": {"type": "string"},
         "examples": {"type": "integer"},
         "edge": {"type": "boolean"},
+        "rtol": {"type": "number", "minimum": 0},
+        "atol": {"type": "number", "minimum": 0},
     },
     "required": ["fast", "reference", "inputs"],
 }
@@ -138,8 +149,12 @@ class _Edges:
         lo, hi = self._arg(a, k, 0, "min_value"), self._arg(a, k, 1, "max_value")
         cand = [x for x in (lo, hi) if x is not None] + [0.0, 1.0, -1.0]
         out = [float(c) for c in cand if (lo is None or c >= lo) and (hi is None or c <= hi)]
+        if (lo is None or lo < 0 or math.copysign(1, lo) < 0) and (hi is None or hi >= 0):
+            out.append(-0.0)                      # Hypothesis draws -0.0 only where the range reaches below +0.0
         if k.get("allow_infinity", lo is None or hi is None):
             out += [x for x in (math.inf, -math.inf) if (lo is None or x >= lo) and (hi is None or x <= hi)]
+        if k.get("allow_nan", lo is None and hi is None):
+            out.append(math.nan)
         return out
 
     def _e_booleans(self, a, k):
@@ -268,6 +283,7 @@ class Spec:
         self.names: list[str] = []         # dict keys
         self.arity = 1
         self.edge_inputs: list = []        # packed boundary arguments
+        self.edgeless: list = []           # arguments (1-based positions, or names) with no boundary values
         self.gen: Callable | None = None   # generator function, when the inputs are code
 
 
@@ -315,6 +331,7 @@ def parse_inputs(src: str) -> Spec:
         spec.form, spec.arity = "tuple", len(value)
         spec.strategy = st.tuples(*value)
         spec.edge_inputs = _combos([edges.of(s) for s in value])
+        spec.edgeless = [i + 1 for i, s in enumerate(value) if not edges.of(s)]
         return spec
     if isinstance(value, dict) and value and all(_is_strategy(s) for s in value.values()):
         if not all(D.is_name(k) for k in value):
@@ -322,6 +339,7 @@ def parse_inputs(src: str) -> Spec:
         spec.form, spec.names, spec.arity = "dict", list(value), len(value)
         spec.strategy = st.fixed_dictionaries(dict(value))
         spec.edge_inputs = [dict(zip(spec.names, c)) for c in _combos([edges.of(value[n]) for n in spec.names])]
+        spec.edgeless = [n for n in spec.names if not edges.of(value[n])]
         return spec
     if callable(value) and not _is_strategy(value):
         spec.gen = value
@@ -343,12 +361,46 @@ def _raised(e: BaseException) -> str:
     return f"{type(e).__name__}: {msg}" if len(msg) <= 200 else f"{type(e).__name__}: {msg[:200]}..."
 
 
-def _equal(a: Any, b: Any) -> bool:
-    if isinstance(a, (int, float, fractions.Fraction)) and isinstance(b, (int, float, fractions.Fraction)):
+def _num(x: Any) -> bool:
+    return isinstance(x, (int, float, fractions.Fraction))
+
+
+def _plain(x: Any) -> Any:
+    """An array as nested lists (so its elements are compared one by one), anything else as it is."""
+    if hasattr(x, "tolist") and hasattr(x, "shape"):
+        try:
+            return x.tolist()
+        except Exception:  # noqa: BLE001
+            return x
+    return x
+
+
+def _equal(a: Any, b: Any, rtol: float = 0.0, atol: float = 0.0) -> bool:
+    """Numbers are exact unless rtol/atol say otherwise (then wherever either side is a float, also inside lists,
+    tuples and dicts); a list and a tuple compare by element; the rest is make_compare."""
+    a, b = _plain(a), _plain(b)
+    if _num(a) and _num(b):
         if a != a and b != b:                      # both nan: the same outcome
             return True
+        if (rtol or atol) and (isinstance(a, float) or isinstance(b, float)):
+            try:
+                return math.isclose(float(a), float(b), rel_tol=rtol, abs_tol=atol)
+            except OverflowError:
+                pass
         return bool(a == b)                        # exact numbers: make_compare would not call them equal either
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_equal(x, y, rtol, atol) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_equal(a[k], b[k], rtol, atol) for k in a)
     return bool(make_compare(a, b)["equal"])
+
+
+def _rule(rtol: float, atol: float) -> str:
+    if not rtol and not atol:
+        return ("outputs compared exactly (floats not toleranced: 0.1+0.2 and 0.3 disagree; 1/2 and 0.5, a tuple "
+                "and a list, and set order count as equal)")
+    return (f"outputs compared with rtol={rtol:g}, atol={atol:g} wherever either number is a float, also inside "
+            "lists, tuples and dicts (not inside sets); every other number, and everything else, exactly")
 
 
 class _Abort(BaseException):
@@ -365,24 +417,31 @@ class _Found(Exception):
 
 class Runner:
     def __init__(self, fast: Callable, ref: Callable, spec: Spec, ctx, examples: int, edge: bool,
-                 f_bind: str, r_bind: str, seed: int):
+                 f_bind: str, r_bind: str, seed: int, rtol: float = 0.0, atol: float = 0.0):
         self.fast, self.ref, self.spec = fast, ref, spec
         self.ctx, self.examples, self.edge, self.seed = ctx, examples, edge, seed
         self.f_bind, self.r_bind = f_bind, r_bind
-        self.ran = self.edge_ran = self.agree = self.both_raised = 0
+        self.rtol, self.atol = rtol, atol
+        self.ran = self.edge_ran = self.agree = self.both_raised = 0   # ran counts inputs that have finished
+        self.shared = 0                                 # calls that got the caller's own object (it could not be copied)
         self.kinds: dict[str, int] = {}                 # kind of disagreement -> count
         self.witness: dict[str, dict] = {}              # kind -> first record
-        self.stopped = False
+        self.stopped = False                            # the budget ended the sampling phase
+        self.shrinking = False                          # inside the shrinking phase
+        self.shrink_cut = False                         # the budget ended the shrinking phase (sampling was whole)
+        self.inflight: dict | None = None               # what the last progress report said was running
         self._report = time.monotonic()
+        self._since = 0
+        self._announce_next = False
 
     # -- calling
 
-    @staticmethod
-    def _call(fn: Callable, bind: str, packed: Any):
+    def _call(self, fn: Callable, bind: str, packed: Any):
         try:
             args = copy.deepcopy(packed)
         except Exception:  # noqa: BLE001
             args = packed
+            self.shared += 1
         try:
             if isinstance(args, dict):
                 return True, (fn(**args) if bind == "kw" else fn(*args.values()))
@@ -397,17 +456,30 @@ class Runner:
             return _clip(packed[0])
         return _clip(list(packed))
 
+    def _announce(self, who: str, packed: Any) -> None:
+        """Say, before the call, which function is about to run on which input: if it never comes back, this
+        is the last thing the caller hears."""
+        self.inflight = {"in": who, "input": self._show_input(packed), "number": self.ran + 1}
+        self.ctx.progress(self.partial())
+
     def judge(self, packed: Any) -> tuple[str | None, dict]:
-        """(kind of disagreement or None, record). Both raising counts as agreement (kind None, record['both'])."""
+        """(kind of disagreement or None, record). Both raising the same exception type counts as agreement
+        (kind None, record['both'])."""
+        if self._announce_next:
+            self._announce("fast", packed)
         ok_f, vf = self._call(self.fast, self.f_bind, packed)
+        if self._announce_next:
+            self._announce("reference", packed)
         ok_r, vr = self._call(self.ref, self.r_bind, packed)
         rec = {"input": None, "fast": None, "reference": None, "both": False}
         if not ok_f and not ok_r:
-            rec["both"] = True
-            return None, rec
-        if ok_f and ok_r:
+            if type(vf).__name__ == type(vr).__name__:
+                rec["both"] = True
+                return None, rec
+            kind = DIFF_TYPES
+        elif ok_f and ok_r:
             try:
-                same = _equal(vf, vr)
+                same = _equal(vf, vr, self.rtol, self.atol)
             except Exception:  # noqa: BLE001
                 same = False
             if same:
@@ -424,10 +496,10 @@ class Runner:
     # -- counting
 
     def tally(self, packed: Any, edge: bool = False) -> None:
+        kind, rec = self.judge(packed)
         self.ran += 1
         if edge:
             self.edge_ran += 1
-        kind, rec = self.judge(packed)
         if kind is None:
             self.agree += 1
             self.both_raised += rec["both"]
@@ -436,18 +508,37 @@ class Runner:
         self.witness.setdefault(kind, dict(rec, shrunk=False))
 
     def tick(self) -> None:
-        """Called before each input: stream progress, and leave when the time is spent."""
+        """Called before each input: decide whether this input is announced, and leave when the time is spent.
+        Running out of time while sampling stops the run; while shrinking it only cuts the shrinking short."""
         if self.ctx.time_left() <= 0.05:
-            self.stopped = True
+            if self.shrinking:
+                self.shrink_cut = True
+            else:
+                self.stopped = True
             raise _Abort()
+        if self.shrinking:
+            self._announce_next = False
+            return
         now = time.monotonic()
-        if now - self._report >= 0.2:
+        self._since += 1
+        self._announce_next = (self.ran < REPORT_FIRST or self._since >= REPORT_EVERY
+                               or now - self._report >= 0.2)
+        if self._announce_next:
+            self._since = 0
             self._report = now
-            self.ctx.progress(self.partial())
 
     def partial(self) -> dict:
-        return {"result": self.result([]), "method": "sampled",
-                "scope": f"stopped at the time budget after {self.ran} inputs; the rest were not run"}
+        if self.shrinking:
+            shown = [{k: v for k, v in r.items() if k != "both"} for r in self.witness.values()]
+            scope = (f"stopped at the time budget while shrinking, after all {self.ran} inputs had run; the "
+                     "disagreements are shown as first found, not shrunk")
+            return {"result": self.result(shown), "method": "sampled", "scope": scope}
+        scope = f"stopped at the time budget after {self.ran} inputs had finished; the rest were not run"
+        if self.inflight:
+            f = self.inflight
+            scope += (f". The last report was made inside {f['in']}() on input {f['input']!r} (input #{f['number']}); "
+                      "if it never returned, that call is where it stopped (inputs after the report may have run)")
+        return {"result": self.result([]), "method": "sampled", "scope": scope}
 
     def result(self, shown: list[dict]) -> dict:
         d = sum(self.kinds.values())
@@ -547,6 +638,13 @@ def _run(inp: dict, ctx) -> Evidence:
         raise BadInput("examples must be an integer >= 1")
     if not isinstance(edge, bool):
         raise BadInput("edge must be true or false")
+    tol = []
+    for key in ("rtol", "atol"):
+        v = inp.get(key, 0.0)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+            raise BadInput(f"{key} must be a finite number >= 0")
+        tol.append(float(v))
+    rtol, atol = tol
     spec = parse_inputs(inp.get("inputs"))
     seed = ctx.seed if ctx.seed is not None else secrets.randbelow(2 ** 32)
 
@@ -560,11 +658,10 @@ def _run(inp: dict, ctx) -> Evidence:
     else:
         f_bind = r_bind = "kw"
 
-    run = Runner(fast, ref, spec, ctx, examples, edge, f_bind, r_bind, seed)
+    run = Runner(fast, ref, spec, ctx, examples, edge, f_bind, r_bind, seed, rtol, atol)
     cap = max(1, get_config().max_examples)
     notes: list[str] = []
     err: Exception | None = None
-    shrink_cut = False
 
     try:
         ctx.progress(run.partial())
@@ -592,8 +689,11 @@ def _run(inp: dict, ctx) -> Evidence:
                     run.tick()
                     run.tally(packed, edge=True)
                 if not spec.edge_inputs:
+                    which = (f" (argument{'s' if len(spec.edgeless) > 1 else ''} "
+                             f"{', '.join(str(x) for x in spec.edgeless)} had none, and a tuple or dict needs "
+                             "boundary values for every argument)" if spec.edgeless else "")
                     notes.append("edge was on but no boundary values could be derived for this strategy "
-                                 "(it is not one of the built-in kinds, or was built with map/filter)")
+                                 "(it is not one of the built-in kinds, or was built with map/filter)" + which)
             _generated(run)
     except _Abort:
         pass
@@ -609,17 +709,21 @@ def _run(inp: dict, ctx) -> Evidence:
     if err is None:
         for kind in kinds[:cap]:
             rec = run.witness[kind]
-            if spec.gen is None and not run.stopped and ctx.time_left() > 0.1:
+            if spec.gen is None and not run.stopped and not run.shrink_cut and ctx.time_left() > 0.1:
+                run.shrinking = True
+                ctx.progress(run.partial())      # a function that hangs while shrinking leaves this, not a stale line
                 try:
                     better = _shrink(run, kind)
                 except Exception:  # noqa: BLE001
                     better = None
-                if better is None and ctx.time_left() <= 0.05:
-                    shrink_cut = True
+                finally:
+                    run.shrinking = False
                 if better is not None:
                     rec = better
+                elif ctx.time_left() <= 0.05:
+                    run.shrink_cut = True
             elif spec.gen is None:
-                shrink_cut = True
+                run.shrink_cut = True
             shown.append({k: v for k, v in rec.items() if k != "both"})
     hidden = len(kinds) - len(shown)
 
@@ -629,6 +733,8 @@ def _run(inp: dict, ctx) -> Evidence:
         notes.append(f"Hypothesis stopped after {sampled} generated inputs of the {examples} asked for "
                      "(a small input space, or heavy filtering)")
 
+    if run.shrink_cut:
+        notes.append("shrinking was cut short by the time budget; the inputs not shrunk are shown as first found")
     what = f"{run.ran} inputs" if run.ran else "no inputs"
     if spec.gen is not None:
         how = f"{what} from the generator (seed {seed}), not shrunk"
@@ -644,10 +750,17 @@ def _run(inp: dict, ctx) -> Evidence:
         scope = f"ran {how}"
     scope += f"; {d} disagreed, {run.agree} agreed"
     if run.both_raised:
-        scope += f" ({run.both_raised} of the agreements are both raising)"
+        scope += f" ({run.both_raised} of the agreements are both raising the same exception type)"
+    scope += "; " + _rule(rtol, atol)
     if shown and spec.gen is None:
-        scope += ("; each kind of disagreement is shown shrunk by Hypothesis to a minimal input"
-                  + ("" if not shrink_cut else " (shrinking was cut short by the time budget for some)"))
+        loose = [r["kind"] for r in shown if not r.get("shrunk")]
+        if not loose:
+            scope += "; each kind of disagreement is shown shrunk by Hypothesis to a minimal input"
+        else:
+            why = ("shrinking was cut short by the time budget" if run.shrink_cut
+                   else "Hypothesis did not reproduce them, or the functions are not deterministic")
+            scope += (f"; {len(shown) - len(loose)} of the {len(shown)} kinds shown are shrunk by Hypothesis; "
+                      f"not shrunk: {', '.join(loose)} ({why}), shown as first found")
     if hidden > 0:
         scope += f"; {hidden} more kind(s) of disagreement not shown (cap {cap})"
         notes.append(f"showing {len(shown)} of {len(kinds)} kinds of disagreement (cap {cap} = max_examples)")
@@ -658,7 +771,10 @@ def _run(inp: dict, ctx) -> Evidence:
 
     ev = Evidence(button=NAME, result=result, method="sampled", scope=scope,
                   complete=not run.stopped and err is None, seed=seed, examples=list(shown))
-    if run.ran and run.both_raised == run.ran:
+    if run.shared:
+        ev.flag("shared_input", f"{run.shared} call(s) got the caller's own input object because it could not be "
+                "copied, so fast and reference may have shared (and changed) one object")
+    if run.ran and run.both_raised + run.kinds.get(DIFF_TYPES, 0) == run.ran:
         ev.flag("always_raised", "both functions raised on every input, so nothing was compared; "
                 "check that the arguments fit the functions")
     if err is not None:

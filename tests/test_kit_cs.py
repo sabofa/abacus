@@ -41,6 +41,22 @@ def run(name, inp, **kw):
     return budget.call(name, inp, in_process=True, **kw)
 
 
+def run_child(name, inp, **kw):
+    """In a real child process, so a hung function can be cut off by the budget."""
+    registry.load_all()
+    return budget.call(name, inp, **kw)
+
+
+def retry(make, ok, attempts=3):
+    """Timings are noisy: run again a few times before calling a clean result missing (no escape hatch for flags)."""
+    ev = None
+    for _ in range(attempts):
+        ev = make()
+        if ok(ev):
+            break
+    return ev
+
+
 def test_both_buttons_are_registered():
     registry.load_all()
     names = {b.name for b in registry.all_buttons()}
@@ -211,6 +227,114 @@ def test_the_number_of_shrunk_disagreements_is_capped_by_max_examples(monkeypatc
     assert any("1 of 2 kinds of disagreement" in n for n in ev.notes)
 
 
+def test_a_shrink_time_out_does_not_make_the_run_incomplete():
+    # all inputs run (the function is fast), then shrinking slows down and the budget runs out inside it
+    slow_later = ("def f(n, calls=[0]):\n    import time\n    calls[0] += 1\n    if calls[0] > 110:\n"
+                  "        time.sleep(1.0)\n    return n*(n+1)//2 - (1 if n > 5 else 0)\n")
+    ak.diff_test(fast="lambda n: n", reference="lambda n: n", inputs="integers(0, 9)", examples=5)  # imports Hypothesis
+    ev = run("diff_test", dict(fast=slow_later, reference=TRIANGLE_REF, inputs="integers(1, 100)",
+                               examples=100, seed=21), time_s=2.0)
+    assert ev.result["inputs_run"] >= 100
+    assert ev.complete is True, ev.scope
+    assert "were not run" not in ev.scope and "stopped at the time budget after" not in ev.scope
+    shown = ev.result["disagreement_examples"]
+    assert shown and not all(r["shrunk"] for r in shown)
+    assert "each kind of disagreement is shown shrunk" not in ev.scope
+    assert "not shrunk" in ev.scope and "time budget" in ev.scope
+
+
+def test_the_shrunk_sentence_is_only_said_when_every_shown_kind_is_shrunk():
+    ev = ak.diff_test(fast=OFF_BY_ONE, reference=TRIANGLE_REF, inputs="integers(1, 100)", seed=1)
+    assert all(r["shrunk"] for r in ev.result["disagreement_examples"])
+    assert "each kind of disagreement is shown shrunk" in ev.scope
+
+
+def test_floats_are_compared_exactly_unless_a_tolerance_is_given():
+    ev = ak.diff_test(fast="lambda n: 0.1 + 0.2", reference="lambda n: 0.3", inputs="integers(0, 3)", seed=22)
+    assert ev.result["disagreements"] > 0
+    assert "exact" in ev.scope and "not toleranced" in ev.scope
+    ev = ak.diff_test(fast="lambda n: 0.1 + 0.2", reference="lambda n: 0.3", inputs="integers(0, 3)", seed=22,
+                      rtol=1e-9)
+    assert ev.result["disagreements"] == 0 and ev.flags == []
+    assert "rtol=1e-09" in ev.scope and "atol=0" in ev.scope
+    ev = ak.diff_test(fast="lambda n: 1e-12 * n", reference="lambda n: 0.0", inputs="integers(0, 3)", seed=22,
+                      atol=1e-9)
+    assert ev.result["disagreements"] == 0 and "atol=1e-09" in ev.scope
+
+
+def test_tolerance_applies_to_floats_nested_in_lists_tuples_and_dicts():
+    fast = "lambda n: {'k': [0.1 + 0.2, (n * 0.1, 7)], 's': 'a'}"
+    ref = "lambda n: {'k': (0.3, [n / 10, 7]), 's': 'a'}"
+    exact = ak.diff_test(fast=fast, reference=ref, inputs="integers(0, 9)", seed=23)
+    assert exact.result["disagreements"] > 0
+    tol = ak.diff_test(fast=fast, reference=ref, inputs="integers(0, 9)", seed=23, rtol=1e-9)
+    assert tol.result["disagreements"] == 0
+    # a real difference still disagrees, and so does a different structure
+    real = ak.diff_test(fast="lambda n: [1.0, {'a': 2.0}]", reference="lambda n: [1.0, {'a': 2.5}]",
+                        inputs="integers(0, 3)", seed=23, rtol=1e-3, atol=1e-3)
+    assert real.result["disagreements"] > 0
+    keys = ak.diff_test(fast="lambda n: {'a': 1.0}", reference="lambda n: {'b': 1.0}", inputs="integers(0, 3)",
+                        seed=23, rtol=1e-3)
+    assert keys.result["disagreements"] > 0
+
+
+def test_a_bad_tolerance_is_flagged():
+    for kw in (dict(rtol=-1), dict(atol=-0.5), dict(rtol=float("nan")), dict(atol="x")):
+        ev = ak.diff_test(fast="lambda n: n", reference="lambda n: n", inputs="integers(0, 3)", **kw)
+        assert "bad_input" in flags(ev) and ev.complete is False, kw
+
+
+def test_two_different_exceptions_are_a_disagreement():
+    ev = ak.diff_test(fast="lambda n: {}[n]", reference="lambda n: 1 // 0", inputs="integers(0, 5)", seed=24)
+    assert ev.result["disagreements"] > 0 and ev.result["both_raised"] == 0
+    assert "both_raised_different_types" in ev.result["kinds"]
+    d = ev.result["disagreement_examples"][0]
+    assert d["kind"] == "both_raised_different_types"
+    assert d["fast"]["raised"].startswith("KeyError") and d["reference"]["raised"].startswith("ZeroDivisionError")
+
+
+def test_the_same_exception_type_is_agreement_counted_separately_and_said_in_the_scope():
+    ev = ak.diff_test(fast="lambda n: {}[n]", reference="lambda n: {1: 2}[n + 100]", inputs="integers(0, 5)", seed=24)
+    assert ev.result["disagreements"] == 0 and ev.result["both_raised"] == ev.result["inputs_run"] > 0
+    assert "same exception type" in ev.scope
+    assert "always_raised" in flags(ev)
+
+
+def test_a_hung_fast_leaves_a_fresh_partial_that_names_the_input_in_flight():
+    hang = "def f(n):\n    if n == 3:\n        while True:\n            pass\n    return n\n"
+    ev = run_child("diff_test", dict(fast=hang, reference="lambda n: n", inputs="sampled_from([0, 1, 2, 3, 4])",
+                                     examples=50, seed=25, edge=False), time_s=5.0)
+    assert ev.complete is False and ev.budget["stopped"] is True
+    assert "stopped" in ev.scope and ev.result["inputs_run"] >= 1
+    assert "inside fast()" in ev.scope and "input 3" in ev.scope, ev.scope
+
+
+def test_an_input_that_cannot_be_copied_is_flagged_as_shared():
+    gen = "def gen(rng):\n    for i in range(5):\n        yield ((x for x in range(i)),)\n"
+    ev = ak.diff_test(fast="lambda g: 1", reference="lambda g: 1", inputs=gen, seed=26, examples=5)
+    assert "shared_input" in flags(ev)
+    clean = ak.diff_test(fast="lambda n: n", reference="lambda n: n", inputs="integers(0, 5)", seed=26)
+    assert "shared_input" not in flags(clean)
+
+
+def test_float_edges_include_nan_and_negative_zero_and_a_missing_edge_is_explained():
+    from abacus.kit.difftest import _Edges
+    e = _Edges().compute("floats", (), {})
+    assert any(x != x for x in e) and any(x == 0 and math.copysign(1, x) < 0 for x in e)
+    b = _Edges().compute("floats", (0.0, 1.0), {})
+    assert not any(x != x for x in b) and not any(math.isinf(x) for x in b)
+    ev = ak.diff_test(fast="lambda a, b: a", reference="lambda a, b: a",
+                      inputs="(integers(0, 5), from_regex('a+', fullmatch=True))", seed=27, examples=5)
+    assert any("argument 2" in n for n in ev.notes), ev.notes
+
+
+def test_the_descriptions_say_what_is_compared_and_that_code_is_not_sandboxed():
+    registry.load_all()
+    dt = registry.get("diff_test").description
+    assert "not sandboxed" in dt and "rtol" in dt and "exception" in dt
+    assert "memoi" in registry.get("growth").description.lower()
+
+
 def test_a_time_stopped_diff_test_is_incomplete_and_says_how_far_it_got():
     slow = "def f(n):\n    import time\n    time.sleep(0.01)\n    return n\n"
     ak.diff_test(fast="lambda n: n", reference="lambda n: n", inputs="integers(0, 9)", examples=5)  # imports Hypothesis
@@ -254,12 +378,14 @@ def test_fit_classes_recovers_exact_synthetic_curves():
         assert fits[1]["rms_log_residual"] > fits[0]["rms_log_residual"]
 
 
-def test_nested_loop_fits_n_squared_or_is_flagged_unreliable():
-    ev = ak.growth(fn=NESTED, make_input=MAKE_LIST, sizes=[64, 128, 256, 512, 1024], repeats=3)
+def test_nested_loop_fits_n_squared_cleanly():
+    ev = retry(lambda: ak.growth(fn=NESTED, make_input=MAKE_LIST, sizes=[64, 128, 256, 512, 1024], repeats=3),
+               lambda e: e.result["best"] == "n^2" and "unreliable_fit" not in flags(e))
     assert ev.method == "timed" and ev.complete is True and ev.scope.strip()
     assert ev.result["sizes"] == [64, 128, 256, 512, 1024]
     assert len(ev.result["median_s"]) == 5 and all(t > 0 for t in ev.result["median_s"])
-    assert ev.result["best"] == "n^2" or "unreliable_fit" in flags(ev)
+    assert ev.result["best"] == "n^2"
+    assert "unreliable_fit" not in flags(ev)
     assert ev.result["runner_up"] in ("n^3", "n log n", "n", "n^2")
     assert isinstance(ev.result["fit"]["rms_log_residual"], float)
     assert ev.result["ranking"][0]["class"] == ev.result["best"]
@@ -276,10 +402,12 @@ def test_sorted_on_random_lists_fits_n_log_n_or_n():
 
 
 def test_inputs_are_not_mutated_between_calls():
-    ev = ak.growth(fn="lambda xs: xs.sort()", make_input="lambda n: list(range(n, 0, -1))",
-                   sizes=[256, 512, 1024, 2048], repeats=3)
-    assert ev.complete is True and ev.flags == [] or "unreliable_fit" in flags(ev)
-    assert ev.result["sizes"] == [256, 512, 1024, 2048]
+    sizes = [2 ** k for k in range(14, 18)]
+    ev = retry(lambda: ak.growth(fn="lambda xs: xs.sort()", make_input="lambda n: list(range(n, 0, -1))",
+                                 sizes=sizes, repeats=3),
+               lambda e: e.complete and "unreliable_fit" not in flags(e))
+    assert ev.complete is True and "unreliable_fit" not in flags(ev), ev.flags
+    assert ev.result["sizes"] == sizes
     assert any("fn changed its input" in n for n in ev.notes)
 
 
@@ -303,6 +431,47 @@ def test_default_sizes_double_from_16_until_the_budget_runs_out():
     assert ev.complete is True
     assert f"{len(sizes)} sizes" in " ".join(ev.notes)
     assert "16" in ev.scope and str(sizes[-1]) in ev.scope
+
+
+def test_a_budget_cut_in_the_middle_of_a_size_is_not_complete():
+    slow = "def f(xs):\n    import time\n    time.sleep(0.05)\n    return 1\n"
+    ev = run("growth", dict(fn=slow, make_input=MAKE_LIST, repeats=30), time_s=1.0)
+    assert ev.result["sizes"] == [16] and ev.result["repeats"][0] < 30
+    assert ev.complete is False
+    assert "stopped" in ev.scope and "n = 16" in ev.scope and f"{ev.result['repeats'][0]} of 30 repeats" in ev.scope
+
+
+def test_default_sizes_on_sorted_are_a_clean_n_log_n_fit():
+    def make():
+        return run("growth", dict(fn="lambda xs: sorted(xs)", make_input=MAKE_RANDOM), time_s=6.0)
+
+    def clean(ev):
+        top2 = [c["class"] for c in ev.result["ranking"][:2]]
+        return "unreliable_fit" not in flags(ev) and "n log n" in top2
+    ev = retry(make, clean, attempts=4)
+    assert "unreliable_fit" not in flags(ev), (ev.flags, ev.result["ranking"][:3])
+    assert "n log n" in [c["class"] for c in ev.result["ranking"][:2]], ev.result["ranking"]
+    # the scope says which sizes the fit used, and the dropped small sizes are not among them
+    fit_sizes = ev.result["fit_sizes"]
+    assert fit_sizes and fit_sizes[-1] == ev.result["sizes"][-1] and fit_sizes[0] > ev.result["sizes"][0]
+    assert "fit used" in ev.scope and str(fit_sizes[0]) in ev.scope and "overhead" in ev.scope
+
+
+def test_timings_at_the_call_overhead_name_no_class():
+    ev = run("growth", dict(fn="lambda xs: 1", make_input=MAKE_LIST, repeats=3), time_s=1.5)
+    assert ev.result["best"] is None and ev.result["fit"] is None
+    assert ev.result["fit_sizes"] == []
+    assert "unreliable_fit" in flags(ev)
+    assert "overhead" in ev.scope
+
+
+def test_a_collection_runs_before_timed_blocks(monkeypatch):
+    import gc
+    calls = []
+    real = gc.collect
+    monkeypatch.setattr(gc, "collect", lambda *a: (calls.append(1), real(*a))[1])
+    ak.growth(fn=NESTED, make_input=MAKE_LIST, sizes=[32, 64, 128, 256], repeats=3)
+    assert len(calls) >= 4
 
 
 def test_a_time_stopped_growth_is_incomplete_and_says_how_far_it_got():

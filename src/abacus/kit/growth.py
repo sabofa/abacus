@@ -6,6 +6,7 @@ number (the relative RMS residual), never as a verdict. With fewer than 4 sizes 
 from __future__ import annotations
 
 import copy
+import gc
 import inspect
 import math
 import random
@@ -33,6 +34,7 @@ BATCH_TARGET_S = 2e-3           # a timed block of pure calls is made at least t
 RESERVE_S = 0.05
 POOR_FIT = 0.35                 # relative RMS residual above which no class describes the timings well
 TIMER_NOISE_S = 1e-4            # a slowest median under this is mostly timer and call overhead
+OVERHEAD_MULT = 20              # a size whose median is under this many call overheads is left out of the fit
 
 DESCRIPTION = (
     "Measure how a function's running time grows with input size. fn is code (a lambda, a def, or an expression in "
@@ -40,9 +42,15 @@ DESCRIPTION = (
     "seeded by n, so the same input is built each run). sizes defaults to doubling from 16 until the next doubling is "
     "predicted not to fit the time budget; repeats (default 5) is how many timed calls per size, after a warm-up call. "
     "Result: the median time per size, the best-fitting class among 1, log n, n, n log n, n^2, n^3 and 2^n with the "
-    "fit's relative RMS residual in log space, and the runner-up. Timings are noisy and fits on small n are "
-    "unreliable; with fewer than 4 sizes no class is named. A function that changes its input gets a fresh copy for "
-    "every timed call."
+    "fit's relative RMS residual in log space, and the runner-up. The cost of calling an empty function is measured "
+    "and subtracted from every median, and sizes whose median is under 20 times that cost are left out of the fit "
+    "(the scope lists the sizes the fit used); if none is above it, no class is named. Timings are noisy and fits on "
+    "small n are unreliable; with fewer than 4 sizes no class is named. A function that changes its input gets a "
+    "fresh copy for every timed call; one that does not is timed repeatedly on the same input, so a cache or "
+    "memoised function is timed hot (the warm-up call fills it) and its growth is not what a first call would show. "
+    "A garbage collection runs before timed blocks (collection stays on). If the budget cuts a size short, that size's "
+    "median comes from fewer repeats and the result is incomplete. fn and make_input are Python code that is "
+    "executed, not sandboxed."
 )
 
 SCHEMA = {
@@ -129,14 +137,47 @@ def _spreads(fn: Callable) -> bool:
     return len(ps) >= 2
 
 
+def _noop(*_a: Any) -> None:
+    return None
+
+
 class Timer:
     def __init__(self, fn: Callable, make: Callable, repeats: int, ctx):
         self.fn, self.make, self.repeats, self.ctx = fn, make, repeats, ctx
         self.spread = _spreads(fn)
         self.mutating = False     # set if any size's input changed under fn
+        self.gc_cost = 0.0        # seconds the last collection took
+        self.overhead = self._measure_overhead()
+
+    def _invoke(self, fn: Callable, arg: Any):
+        return fn(*arg) if self.spread and isinstance(arg, tuple) else fn(arg)
 
     def _call(self, arg: Any):
-        return self.fn(*arg) if self.spread and isinstance(arg, tuple) else self.fn(arg)
+        return self._invoke(self.fn, arg)
+
+    def _measure_overhead(self) -> float:
+        """Seconds one call costs when fn does nothing: the same call path, timed both in a batch and singly."""
+        arg: Any = (0, 0) if self.spread else 0
+        reps, best = 20_000, math.inf
+        for _ in range(3):
+            t = time.perf_counter()
+            for _ in range(reps):
+                self._invoke(_noop, arg)
+            best = min(best, (time.perf_counter() - t) / reps)
+        singles = []
+        for _ in range(200):
+            t = time.perf_counter()
+            self._invoke(_noop, arg)
+            singles.append(time.perf_counter() - t)
+        return max(best, statistics.median(singles), 5e-8)
+
+    def _collect(self, block_s: float, first: bool) -> None:
+        """A collection before a timed block, so a pause from garbage left by the last block is not timed.
+        Collection stays on. A collection that costs far more than the block it precedes is run once per size only."""
+        if first or self.gc_cost <= 2 * block_s:
+            t = time.perf_counter()
+            gc.collect()
+            self.gc_cost = time.perf_counter() - t
 
     def build(self, n: int) -> Any:
         """make_input(n) with the global random generators seeded by n (and put back after)."""
@@ -151,8 +192,9 @@ class Timer:
             random.setstate(st_py)
             np.random.set_state(st_np)
 
-    def measure(self, n: int) -> tuple[float, int] | None:
-        """(median seconds per call, timed calls) at size n, or None if the budget ran out before 3 calls."""
+    def measure(self, n: int) -> tuple[float, int, bool] | None:
+        """(median seconds per call, timed calls, cut) at size n; ``cut`` is true when the budget ended the repeats
+        early, so the median is from fewer calls than asked. None if the budget ran out before 3 calls."""
         arg = self.build(n)
         before = _snapshot(arg, deep=_small(arg))
         try:
@@ -169,17 +211,22 @@ class Timer:
         if pure and warm < BATCH_TARGET_S / 2:
             batch = min(100_000, max(1, math.ceil(BATCH_TARGET_S / max(warm, 5e-8))))
         times: list[float] = []
-        for _ in range(self.repeats):
+        cut = False
+        block_est = warm * batch if pure else warm
+        for i in range(self.repeats):
             if self.ctx.time_left() <= RESERVE_S:
+                cut = True
                 break
             try:
                 if pure:
+                    self._collect(block_est, first=(i == 0))
                     t = time.perf_counter()
                     for _ in range(batch):
                         self._call(arg)
                     dt = (time.perf_counter() - t) / batch
                 else:
                     fresh = self.build(n)       # a freshly built input; building it is not timed
+                    self._collect(block_est, first=(i == 0))
                     t = time.perf_counter()
                     self._call(fresh)
                     dt = time.perf_counter() - t
@@ -191,7 +238,7 @@ class Timer:
         need = min(3, self.repeats)
         if len(times) < need:
             return None
-        return statistics.median(times), len(times)
+        return statistics.median(times), len(times), cut
 
 
 # ------------------------------------------------------------------------------------------------ the button
@@ -223,10 +270,11 @@ def _run(inp: dict, ctx) -> Evidence:
     costs: list[float] = []
     err: _UserError | None = None
     interrupted = False       # the budget ran out while timing a size
+    cut_size: tuple[int, int] | None = None   # (n, repeats it got) when the budget ended a size's repeats early
     skipped: list[int] = []   # requested sizes that were not timed
 
     def partial() -> dict:
-        return {"result": _result(sizes, medians, counts), "method": "timed",
+        return {"result": _result(sizes, medians, counts, timer.overhead), "method": "timed",
                 "scope": f"stopped at the time budget after timing {len(sizes)} size(s); the rest were not timed"}
 
     pending = list(given) if given is not None else None
@@ -252,6 +300,11 @@ def _run(inp: dict, ctx) -> Evidence:
             counts.append(got[1])
             costs.append(cost)
             ctx.progress(partial())
+            if got[2]:
+                interrupted = True
+                cut_size = (n, got[1])
+                stop_reason = f"the time budget ended the repeats at n = {n} early"
+                break
             # the next size
             if pending is not None:
                 idx += 1
@@ -283,7 +336,8 @@ def _run(inp: dict, ctx) -> Evidence:
     if not sizes and err is None:
         complete = False
 
-    result = _result(sizes, medians, counts)
+    result = _result(sizes, medians, counts, timer.overhead)
+    fit_sizes = result["fit_sizes"]
     notes = ["timings are noisy, and fits on small n are unreliable; run it again, or give larger sizes, "
              "to see how far the ranking moves"]
     ev_flags: list[tuple[str, str]] = []
@@ -296,7 +350,16 @@ def _run(inp: dict, ctx) -> Evidence:
                      "no class is named")
         ev_flags.append(("unreliable_fit", f"only {k} size(s) were timed; the ranking is shown but no class is named"))
     rank = result["ranking"]
-    if k >= MIN_SIZES and rank:
+    kf = len(fit_sizes)
+    floor_s = OVERHEAD_MULT * timer.overhead
+    if k >= MIN_SIZES and kf == 0:
+        ev_flags.append(("unreliable_fit", f"every median is under {OVERHEAD_MULT} times the call overhead "
+                         f"({timer.overhead:.1e} s), so the timings show the cost of calling, not growth; no class "
+                         "is named. Use larger sizes or a heavier fn"))
+    elif k >= MIN_SIZES and kf < MIN_SIZES:
+        ev_flags.append(("unreliable_fit", f"only {kf} of {k} sizes are above {OVERHEAD_MULT} times the call "
+                         f"overhead ({floor_s:.1e} s); no class is named"))
+    if k >= MIN_SIZES and kf >= MIN_SIZES and rank:
         best, run_up = rank[0], rank[1]
         if best["rms_log_residual"] > POOR_FIT:
             ev_flags.append(("unreliable_fit", f"the best fit leaves a relative RMS residual of "
@@ -311,6 +374,8 @@ def _run(inp: dict, ctx) -> Evidence:
     notes.append("the classes are 1, log n, n, n log n, n^2, n^3 and 2^n only; a growth between them "
                  "(n^1.5, say) is shown as the nearest one")
 
+    cut_text = (f"; the repeats at n = {cut_size[0]} were cut by the time budget (it got {cut_size[1]} of "
+                f"{repeats} repeats, so that median is from fewer calls)" if cut_size else "")
     if k:
         span = f"n = {sizes[0]}..{sizes[-1]} ({k} sizes, median of up to {repeats} calls each after a warm-up call, " \
                "time.perf_counter)"
@@ -320,14 +385,32 @@ def _run(inp: dict, ctx) -> Evidence:
         scope = f"fn/make_input raised at n = {err.n} after timing {k} size(s); " + span
     elif not complete:
         if given_cut:
-            scope = (f"stopped at the time budget after timing {span}; the requested sizes "
+            scope = (f"stopped at the time budget after timing {span}{cut_text}; the requested sizes "
                      f"{skipped[:6]}{'...' if len(skipped) > 6 else ''} were not timed")
         else:
-            scope = f"stopped at the time budget after timing {span}; larger sizes were not timed"
+            scope = f"stopped at the time budget after timing {span}{cut_text}; larger sizes were not timed"
     else:
         scope = f"timed {span}"
         if stop_reason:
             scope += f"; sizes stopped there because {stop_reason}"
+    if k:
+        if kf:
+            used = f"n = {fit_sizes[0]}..{fit_sizes[-1]}" if kf > 1 else f"n = {fit_sizes[0]}"
+            under = k - result["above_overhead"]
+            halved = result["above_overhead"] - kf
+            left = []
+            if under:
+                left.append(f"the {under} smaller size(s) whose median is under {OVERHEAD_MULT} times the measured "
+                            f"call overhead of {timer.overhead:.1e} s")
+            if halved:
+                left.append(f"the {halved} next-smaller size(s), since {2 * MIN_SIZES} or more sizes were above "
+                            "the overhead and only the larger half is fitted")
+            scope += (f"; the fit used {used} ({kf} of {k} sizes)"
+                      + (", leaving out " + " and ".join(left) if left else "")
+                      + ", with the call overhead subtracted from each median")
+        else:
+            scope += (f"; the fit used no size: every median is under {OVERHEAD_MULT} times the measured call "
+                      f"overhead of {timer.overhead:.1e} s")
     scope += ("; ranked against 1, log n, n, n log n, n^2, n^3 and 2^n. This is the time on these inputs at these "
               "sizes: other input shapes, the worst case and larger n are not covered")
     if 0 < k < MIN_SIZES:
@@ -343,14 +426,23 @@ def _run(inp: dict, ctx) -> Evidence:
     return ev
 
 
-def _result(sizes: list[int], medians: list[float], counts: list[int]) -> dict:
+def _result(sizes: list[int], medians: list[float], counts: list[int], overhead: float) -> dict:
+    """The timings, and the ranking fitted on the sizes whose median is well above the call overhead (the overhead
+    subtracted)."""
     k = len(sizes)
+    keep = [i for i, t in enumerate(medians) if t >= OVERHEAD_MULT * overhead]
+    above = len(keep)
+    if above >= 2 * MIN_SIZES:          # plenty of sizes: fit the larger half, where the growth shows (not the cache
+        keep = keep[above - math.ceil(above / 2):]   # and start-up effects of the smaller ones)
+    fs = [sizes[i] for i in keep]
+    ft = [medians[i] - overhead for i in keep]
     res: dict[str, Any] = {"sizes": list(sizes), "median_s": list(medians), "repeats": list(counts),
+                           "overhead_s": overhead, "above_overhead": above, "fit_sizes": fs,
                            "best": None, "runner_up": None, "fit": None, "ranking": []}
-    if k >= 2:
-        rank = fit_classes(sizes, medians)
+    if len(fs) >= 2:
+        rank = fit_classes(fs, ft)
         res["ranking"] = rank
-        if k >= MIN_SIZES:
+        if len(fs) >= MIN_SIZES:
             res["best"], res["runner_up"] = rank[0]["class"], rank[1]["class"]
             res["fit"] = {"rms_log_residual": rank[0]["rms_log_residual"], "constant_s": rank[0]["constant_s"],
                           "runner_up_rms_log_residual": rank[1]["rms_log_residual"]}
