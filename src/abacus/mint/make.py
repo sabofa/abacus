@@ -26,6 +26,7 @@ from typing import Any
 
 import sympy
 
+from ..algo.agree import check_agrees
 from ..algo.loader import LoadedAlgo, load_algo, validate_knobs
 from ..algo.roles import Instance, run_role
 from ..evidence import Evidence, jsonable, make_compare
@@ -328,12 +329,10 @@ def make_batch(algo_ref, *, count: int, seed: int, knobs: dict | None = None,
             ev = call("check", args={"params": inst.params, "proposed": answer})
             evidence.append(ev)
             undone.append(_unfinished("check", ev))
-            # A check may build its own compare dict, with no `equal` and no `computed`: then the result
-            # bool is the verdict if there is one, and if there is none it gave no verdict.
+            # A check may build its own compare dict, with no `equal` and no `computed`, or add `consistent`
+            # (a sampled check's own judgement): check_agrees reads them, and the result bool.
             cmp = ev.compare if isinstance(ev.compare, dict) else {}
-            verdict = cmp.get("equal")
-            if verdict is None and isinstance(ev.result, bool):
-                verdict = ev.result
+            verdict = check_agrees(ev)
             if verdict is False or (verdict is None and ev.complete):
                 computed = f" (it computed {_show(cmp['computed'])})" if "computed" in cmp else ""
                 disagree.append(f"check does not accept generate's answer {_show(answer)}{computed}")

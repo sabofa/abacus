@@ -168,3 +168,30 @@ def to_create_questions(instances: Iterable[dict], *, tags, node_keys=None, fami
     if not questions:
         problems.append(f"{NO_QUESTIONS}: no instances to export, so the payload has no questions")
     return {"questions": questions, "idempotency_key": batch_id}, problems
+
+
+LINK_PREFIX = "osmosis:q:"
+
+
+def parse_created(response: Any) -> list[dict]:
+    """The entries of a `create_questions` response, as `{remote_id, target, preview}`: the question's id, the
+    link target `osmosis:q:<lineage_id>` (the lineage id survives edits, the version id does not), and the start
+    of its prompt. `response` is the parsed response, `{"created": [...]}`, or just that list.
+
+    An entry that cannot be linked (not an object, or no lineage id) comes back with `target` None, so the
+    caller can report it. ValueError when the response has no `created` list.
+    """
+    if isinstance(response, list):
+        entries = response
+    elif isinstance(response, dict) and isinstance(response.get("created"), list):
+        entries = response["created"]
+    else:
+        raise ValueError("the response must be {'created': [{id, lineage_id, prompt_preview}, ...]}")
+    out = []
+    for e in entries:
+        e = e if isinstance(e, dict) else {}
+        lineage = e.get("lineage_id")
+        out.append({"remote_id": e.get("id"),
+                    "target": LINK_PREFIX + lineage.strip() if _text(lineage) else None,
+                    "preview": e.get("prompt_preview") if isinstance(e.get("prompt_preview"), str) else ""})
+    return out

@@ -127,7 +127,7 @@ def test_dice_is_deterministic_and_rational():
     for seed in range(10):
         _, inst = instance("dice-expected-value", seed)
         v = Fraction(str(inst.answer["value"]))
-        assert 1 <= v <= 30
+        assert 1.3 <= v <= 4.4 and v.denominator < 10**6  # inside the declared range, short enough to type
 
 
 def test_dice_exact_values():
@@ -139,7 +139,7 @@ def test_dice_exact_values():
     assert a.module.compute({"n": 2, "sides": 2}) == Fraction(9, 4)
 
 
-def test_dice_check_is_simulates_evidence_and_has_no_verdict_key():
+def test_dice_check_is_simulates_evidence_with_consistent_and_no_verdict_key():
     a = algo("dice-expected-value")
     params = {"n": 10, "sides": 6}
     exact = a.module.compute(params)
@@ -147,12 +147,12 @@ def test_dice_check_is_simulates_evidence_and_has_no_verdict_key():
     d = ev.to_dict()
     assert ev.button == "simulate" and ev.method == "sampled"
     assert d["result"]["trials_run"] <= 20_000 and len(d["result"]["ci95"]) == 2
-    assert d["compare"]["equal"] is True
+    assert d["compare"]["equal"] is False and d["compare"]["consistent"] is True  # simulate's own equal is left alone
     assert not BANNED & set(walk_keys(d))
     again = a.module.check(params, exact).to_dict()  # seeded, so repeatable apart from timings
     assert {**d, "budget": None} == {**again, "budget": None}
     wrong = a.module.check(params, exact + 1)
-    assert wrong.compare["equal"] is False
+    assert wrong.compare["equal"] is False and wrong.compare["consistent"] is False
     assert wrong.result == ev.result  # the estimate does not depend on what was proposed
 
 
@@ -188,3 +188,39 @@ def test_checker_only_rejects_bad_input():
         m.compute({"N": 0, "d": 3})
     with pytest.raises(ValueError):
         m.compute({"N": 10 ** 9, "d": 3})
+
+
+def test_dice_answers_are_typeable_and_spread_over_seeds():
+    seen = set()
+    for seed in range(60):
+        _, inst = instance("dice-expected-value", seed)
+        v = Fraction(str(inst.answer["value"]))
+        assert v.denominator < 10**6, (seed, v)
+        seen.add(v)
+    assert len(seen) >= 15
+    meta = algo("dice-expected-value").meta["answer"]["range"]
+    lo, hi = min(seen), max(seen)
+    assert meta[0] <= lo and hi <= meta[1] and lo < 1.6 and hi > 3.5  # the declared range is the real one
+
+
+def test_dice_makes_a_batch_with_no_disagreement_and_no_lint_problem(tmp_path, monkeypatch):
+    import shutil
+    from abacus.mint import batchfile, make
+    lib = tmp_path / "lib"
+    (lib / "examples").mkdir(parents=True)
+    shutil.copy(EXAMPLES / "dice-expected-value.py", lib / "examples")
+    monkeypatch.setenv("ABACUS_LIBRARY", str(lib))
+    path = make.make("examples.dice-expected-value", count=6, seed=3)
+    head, rows = batchfile.read(path)
+    assert "derivations_disagree" not in head["flags_by_code"] and all("derivations_disagree" not in r["flags"] for r in rows)
+    ev = lint(EXAMPLES / "dice-expected-value.py", k=10)
+    assert all(c["status"] == "ok" for c in ev.result["checks"])
+
+
+def test_digit_checker_raises_value_error_for_a_missing_param():
+    m = algo("sum-of-digits-check").module
+    for params in ({"N": 100}, {"d": 3}, {}):
+        with pytest.raises(ValueError):
+            m.compute(params)
+        with pytest.raises(ValueError):
+            m.check(params, 1)

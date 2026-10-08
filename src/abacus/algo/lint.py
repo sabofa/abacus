@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..evidence import Evidence, jsonable, make_compare
+from .agree import check_agrees
 from .loader import AlgoImportError, MetaError, algo_hash, load_algo
 from .rng import AbacusRNG
 from .roles import normalise_instance
@@ -215,7 +216,7 @@ def lint(path, *, k: int = DEFAULT_K, time_s: float | None = None) -> Evidence:
                         break
                     try:
                         ev = timed("check", chk, inst.params, val)
-                        eq = (ev.compare["equal"] if ev.compare else ev.result) if isinstance(ev, Evidence) else None
+                        eq = check_agrees(ev) if isinstance(ev, Evidence) else None
                         if eq is not True:
                             dis.append({"seed": seed, "role": "check", "reported_equal": eq, "answer": val})
                     except _ROLE_ERRORS as e:

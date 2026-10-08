@@ -1,7 +1,7 @@
-"""The minting flow end to end (kit/09 s5): make, review, export, link, with a recorded create_questions response.
+"""The minting flow end to end (kit/09 s5): make, review, export, link, with a modelled create_questions response.
 
-No Osmosis is called. The response in tests/fixtures/create_questions_response.json was recorded from the
-batch this test makes (seed SEED, instance 4 dropped), so it has one entry per kept instance, in order.
+No Osmosis is called. The response in tests/fixtures/create_questions_response.json is modelled on Osmosis's reply (it is not a
+capture) and built from the batch this test makes (seed SEED, instance 4 dropped), so it has one entry per kept instance, in order.
 """
 import json
 import shutil
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from abacus.adapters import osmosis
 from abacus.cli import main
 from abacus.library import index, links, usage
 from abacus.mint import batchfile, export, link, make, review
@@ -108,8 +109,8 @@ def test_link_writes_one_minted_link_per_kept_instance(flow):
         assert rec["target"] == f"osmosis:q:{entry['lineage_id']}" and rec["kind"] == "minted"
         assert rec["algo"] == ALGO_ID and rec["algo_hash"] == row["algo_hash"] == head["algo_hash"]
         assert rec["seed"] == row["seed"] and rec["batch"] == batch_id
-        assert row["lineage_id"] == entry["lineage_id"] and row["osmosis_id"] == entry["id"]
-    assert "lineage_id" not in next(r for r in rows if r["index"] == 4)  # the dropped one is not linked
+        assert row["target"] == rec["target"] and row["remote_id"] == entry["id"]
+    assert "target" not in next(r for r in rows if r["index"] == 4)  # the dropped one is not linked
 
 
 def test_linking_the_same_response_again_adds_nothing(flow):
@@ -126,9 +127,9 @@ def test_link_matches_on_prompt_when_the_order_differs(flow):
     assert info["matched_by"] == "prompt" and info["linked"] == 9
     assert {p["code"] for p in info["problems"]} == {"no_match"} and len(info["problems"]) == 1
     rows = batchfile.read(flow["batch"])[1]
-    by_lineage = {r["lineage_id"]: r for r in rows if "lineage_id" in r}
+    by_target = {r["target"]: r for r in rows if "target" in r}
     for entry in created["created"]:
-        assert by_lineage[entry["lineage_id"]]["statement"].startswith(entry["prompt_preview"].rstrip("…"))
+        assert by_target["osmosis:q:" + entry["lineage_id"]]["statement"].startswith(entry["prompt_preview"].rstrip("…"))
 
 
 def test_link_reports_a_short_response_and_a_bad_entry(flow):
@@ -158,3 +159,127 @@ def test_find_and_search_lead_back_to_the_algorithm(flow, capsys):
     assert hit["uses"] == usage.counts()[ALGO_ID] and hit["uses"] >= 10  # make ran generate/compute/check/demo
     assert [h["id"] for h in index.search("", tag="aime", linked="osmosis")] == [ALGO_ID]
     assert index.search("", tag="aime", unlinked=True) == []
+
+
+# --- the adapter reads the response; link.py sees only neutral fields ---------------------------------
+
+def test_parse_created_gives_neutral_entries():
+    got = osmosis.parse_created({"created": [
+        {"id": "q_1", "lineage_id": " ln_a ", "prompt_preview": "Find x\u2026"},
+        {"id": "q_2", "prompt_preview": "no lineage"},
+        "junk"]})
+    assert got == [{"remote_id": "q_1", "target": "osmosis:q:ln_a", "preview": "Find x\u2026"},
+                   {"remote_id": "q_2", "target": None, "preview": "no lineage"},
+                   {"remote_id": None, "target": None, "preview": ""}]
+    assert osmosis.parse_created([{"id": "q", "lineage_id": "l"}])[0]["target"] == "osmosis:q:l"
+    with pytest.raises(ValueError):
+        osmosis.parse_created({"questions": []})
+
+
+def test_link_py_and_the_button_name_no_osmosis_field():
+    for name in ("link.py", "surface.py"):
+        text = (ROOT / "src" / "abacus" / "mint" / name).read_text(encoding="utf-8")
+        assert "lineage_id" not in text and "osmosis_id" not in text and "prompt_preview" not in text
+
+
+# --- stale, conflicting and ambiguous links ------------------------------------------------------
+
+def _hand_batch(lib, statements):
+    """A batch of kept instances written by hand: algo, seed and statement are all `link` needs."""
+    path = lib / "batches" / "2026-10-07-hand-01.jsonl"
+    head = {"batch": "2026-10-07-hand-01", "algo_hash": "h1"}
+    rows = [{"index": i, "decision": "keep", "algo": ALGO_ID, "algo_hash": "h1", "seed": 100 + i, "statement": s}
+            for i, s in enumerate(statements, start=1)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    batchfile.write_atomic(path, batchfile.render(head, rows))
+    return path
+
+
+def _response(prefix, previews):
+    return {"created": [{"id": f"q_{prefix}{i}", "lineage_id": f"{prefix}{i}", "prompt_preview": p}
+                        for i, p in enumerate(previews)]}
+
+
+STATEMENTS = [f"Find the remainder when ${a}^{{5^{{7}}}}$ is divided by {m}." for a, m in
+              ((2, 440), (3, 441), (4, 442), (5, 443))]
+PREVIEWS = [s[:30] + "\u2026" for s in STATEMENTS]
+SAME = "Find the remainder when $2^{5^{7}}$ is divided b"  # the start two different instances share
+
+
+def test_the_same_response_twice_adds_nothing(lib):
+    path = _hand_batch(lib, STATEMENTS)
+    first = link.link_batch(path, _response("ln", PREVIEWS))[1]
+    again = link.link_batch(path, _response("ln", PREVIEWS))[1]
+    assert first["linked"] == 4 and again["linked"] == 0 and again["already_linked"] == 4
+    assert again["problems"] == [] and len(links.list_links(algo=ALGO_ID)) == 4
+
+
+def test_a_different_response_flags_the_conflicts_and_adds_no_links(lib):
+    path = _hand_batch(lib, STATEMENTS)
+    link.link(path, _response("ln", PREVIEWS))
+    before = batchfile.read(path)[1]
+    _, info = link.link_batch(path, _response("zz", PREVIEWS))
+    assert info["linked"] == 0
+    assert [p["code"] for p in info["problems"]] == ["relinked_conflict"] * 4
+    assert "osmosis:q:ln0" in info["problems"][0]["message"] and "osmosis:q:zz0" in info["problems"][0]["message"]
+    assert sorted(x["target"] for x in links.list_links(algo=ALGO_ID)) == [f"osmosis:q:ln{i}" for i in range(4)]
+    assert batchfile.read(path)[1] == before  # the batch still records the first links
+
+
+def test_identical_previews_are_ambiguous_and_not_linked(lib):
+    stmts = [f"{SAME}y 440.", f"{SAME}y 938.", "Another question entirely."]
+    path = _hand_batch(lib, stmts)
+    # the entries are in another order than the instances, so the order rule does not apply
+    resp = _response("ln", [stmts[2][:20], SAME + "\u2026", SAME + "\u2026"])
+    _, info = link.link_batch(path, resp)
+    assert info["matched_by"] == "prompt" and info["linked"] == 1
+    amb = [p for p in info["problems"] if p["code"] == "ambiguous"]
+    assert len(amb) == 2 and "entry 2" in amb[0]["message"] and "entry 3" in amb[1]["message"]
+    assert [x["target"] for x in links.list_links(algo=ALGO_ID)] == ["osmosis:q:ln0"]
+    assert {p["code"] for p in info["problems"]} >= {"ambiguous", "unmatched_instance"}
+    assert [r.get("target") for r in batchfile.read(path)[1]] == [None, None, "osmosis:q:ln0"]
+
+
+def test_order_stays_primary_when_previews_are_identical(lib):
+    path = _hand_batch(lib, [f"{SAME}y 440.", f"{SAME}y 938."])
+    _, info = link.link_batch(path, _response("ln", [SAME + "\u2026", SAME + "\u2026"]))
+    assert info["matched_by"] == "order" and info["linked"] == 2 and info["problems"] == []
+
+
+def test_an_entry_with_no_target_is_reported_and_the_rest_linked(lib):
+    path = _hand_batch(lib, STATEMENTS[:2])
+    resp = _response("ln", PREVIEWS[:2])
+    resp["created"][1]["lineage_id"] = "   "
+    _, info = link.link_batch(path, resp)
+    assert info["linked"] == 1 and "bad_entry" in [p["code"] for p in info["problems"]]
+
+
+def test_a_bad_target_is_checked_before_anything_is_written(lib):
+    path = _hand_batch(lib, STATEMENTS[:3])
+    resp = _response("ln", PREVIEWS[:3])
+    resp["created"][2]["lineage_id"] = "x" + chr(10) + "y"
+    _, info = link.link_batch(path, resp)
+    assert "bad_target" in [p["code"] for p in info["problems"]]
+    assert info["linked"] == 2 and len(links.list_links(algo=ALGO_ID)) == 2
+
+
+def test_link_takes_the_lock_review_takes(lib, monkeypatch):
+    import contextlib
+    path = _hand_batch(lib, STATEMENTS[:1])
+    held = []
+    real = link.file_lock
+
+    @contextlib.contextmanager
+    def spy(p):
+        with real(p):
+            held.append(Path(p).name)
+            yield
+    monkeypatch.setattr(link, "file_lock", spy)
+    link.link(path, _response("ln", PREVIEWS[:1]))
+    assert held == [path.name]
+    lock = path.with_name(path.name + ".lock")
+    assert not lock.exists()
+    lock.write_text("")  # a held lock makes review wait, then time out
+    monkeypatch.setattr("abacus.library._jsonl.LOCK_TIMEOUT_S", 0.1)
+    with pytest.raises(TimeoutError):
+        review.review(path, drop=[1])

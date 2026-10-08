@@ -257,3 +257,26 @@ def test_a_hung_role_is_killed_at_the_budget_when_linted_through_the_button():
     ev = budget.call("algo_lint", {"path": str(FIX / "lint_hang.py"), "k": 2}, time_s=2)
     assert ev.complete is False and ev.budget["stopped"] is True
     assert ev.budget["time_s"] < 6
+
+
+# --- check_agrees: one reading of a check's Evidence --------------------------------------------------
+
+def test_check_agrees_reads_equal_then_consistent_then_the_result():
+    from abacus.algo.agree import check_agrees
+    from abacus.evidence import Evidence
+
+    def ev(result=None, compare=None):
+        e = Evidence(button="check", result=result, method="sampled", scope="s")
+        e.compare = compare
+        return e
+
+    assert check_agrees(ev(0.5, {"equal": True})) is True
+    assert check_agrees(ev(0.5, {"equal": False, "consistent": True})) is True
+    assert check_agrees(ev(True, {"equal": False})) is True  # the result bool, when compare does not say yes
+    assert check_agrees(ev(False, {"equal": False, "consistent": False})) is False
+    assert check_agrees(ev(0.5, {"equal": False, "consistent": False})) is False
+    assert check_agrees(ev(0.5, {"equal": False})) is False
+    assert check_agrees(ev(True)) is True and check_agrees(ev(False)) is False
+    assert check_agrees(ev(0.5, {"z": 1.0})) is None  # no verdict anywhere and a result that is not a bool
+    assert check_agrees(ev(None, None)) is None
+    assert check_agrees(None) is None

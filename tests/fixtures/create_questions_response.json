@@ -1,4 +1,5 @@
 {
+  "_note": "Modelled on the shape of an Osmosis create_questions reply (created: id, lineage_id, prompt_preview); synthetic, not a capture. Built from the batch tests/test_mint_e2e.py makes.",
   "created": [
     {
       "id": "q_26215a7a",

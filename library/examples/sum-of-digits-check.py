@@ -24,7 +24,10 @@ META = {
 
 
 def _params(params):
-    n, d = params["N"], params["d"]
+    try:
+        n, d = params["N"], params["d"]
+    except KeyError as e:
+        raise ValueError(f"params need integers 'N' and 'd'; {e.args[0]!r} is missing") from None
     if not (isinstance(n, int) and isinstance(d, int) and 1 <= n <= MAX_N and d >= 1):
         raise ValueError(f"need integers 1 <= N <= {MAX_N} and d >= 1, got N={n!r}, d={d!r}")
     return n, d

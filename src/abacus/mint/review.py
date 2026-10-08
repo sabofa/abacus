@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from ..library._jsonl import file_lock
 from . import batchfile
 
 KEEP, DROP = "keep", "drop"
@@ -46,6 +47,11 @@ def review_batch(batch_ref, *, drop: Iterable[int] = (), keep: Iterable[int] = (
     """
     drop, keep, notes = _indexes(drop, "drop"), _indexes(keep, "keep"), _notes(notes)
     path = batchfile.resolve(batch_ref)
+    with file_lock(path):  # read, change and replace as one step: `mint link` rewrites the same file
+        return _review_locked(path, drop, keep, notes)
+
+
+def _review_locked(path: Path, drop: list[int], keep: list[int], notes: dict[int, str]) -> tuple[Path, dict]:
     head, rows = batchfile.read(path)
     by_index = {r["index"]: r for r in rows}
     both = sorted(set(drop) & set(keep))

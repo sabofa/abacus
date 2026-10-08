@@ -169,14 +169,16 @@ def mint_export(inp: dict, ctx) -> Evidence:
 
 @registry.button(
     LINK,
-    description="Link a batch to the Osmosis create_questions response that came back for its export. `batch` is "
-                "a batch id or a path; `created` is the response (an object with a `created` list of "
-                "{id, lineage_id, prompt_preview}). Entries are paired with the kept instances by order when the "
-                "counts match and every preview starts its instance's statement; otherwise on the previews. Each "
-                "pair gets a `minted` link osmosis:q:<lineage_id> carrying the algorithm hash, the instance seed "
-                "and the batch id, and the batch row records lineage_id and osmosis_id. Linking the same response "
-                "again adds nothing. Entries without a lineage_id, count mismatches and unpaired instances come "
-                "back as flags (bad_entry, count_mismatch, no_match, unmatched_instance).",
+    description="Link a batch to the consumer's creation response for its export (for Osmosis, the "
+                "create_questions response; its adapter reads the fields). `batch` is a batch id or a path; "
+                "`created` is the response. Entries are paired with the kept instances by order when the counts "
+                "match and every preview starts its instance's statement; otherwise on the previews, and an entry "
+                "that fits several instances is not linked. Each pair gets a `minted` link to the entry's target "
+                "carrying the algorithm hash, the instance seed and the batch id, and the batch row records "
+                "remote_id and target. Linking the same response again adds nothing; a different response for an "
+                "instance that is already linked keeps the first link. Entries without a target, count mismatches, "
+                "unpaired instances and conflicts come back as flags (bad_entry, count_mismatch, no_match, "
+                "ambiguous, unmatched_instance, relinked_conflict, bad_target).",
     input_schema={
         "type": "object",
         "properties": {"batch": {"type": "string"}, "created": {"type": "object"}},

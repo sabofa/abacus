@@ -2,8 +2,12 @@
 
 compute: exact, by the recurrence f(s) = 1 + (1/sides) * sum f(s + face) over Fractions.
 check: a short seeded Monte Carlo through `simulate`; the evidence is simulate's own, so it carries the
-estimate and its interval. `compare.equal` there says only whether the proposed value is consistent with the
-estimate (|z| at most 3); it is not a proof.
+estimate and its interval. simulate's `compare.equal` stays what it is (an exact comparison, false for an
+estimate); this file adds `compare.consistent`, whether the proposed value is within |z| <= 3 of the
+estimate. That is not a proof.
+
+The knobs keep the exact answer short enough to type: its denominator divides sides^n, which is under 10^6
+here (n up to 7, sides up to 6), so the answer is a fraction a person can enter by hand.
 """
 from fractions import Fraction
 
@@ -17,10 +21,10 @@ META = {
     "roles": ["generate", "compute", "check", "hand_space"],
     "tags": ["probability", "expected-value", "quant"],
     "techniques": ["recurrence", "monte-carlo"],
-    "answer": {"format": "rational", "range": [1, 30]},
+    "answer": {"format": "rational", "range": [1.3, 4.4]},
     "knobs": {
-        "n": {"int": [6, 24], "pattern_knob": True},
-        "sides": {"choice": [4, 6, 8]},
+        "n": {"int": [2, 7], "pattern_knob": True},
+        "sides": {"choice": [3, 4, 5, 6]},
     },
     "requires": [],
     "notes": "check runs 10000 trials with a seed taken from the parameters, so it is repeatable.",
@@ -49,15 +53,15 @@ def check(params, proposed):
     ev = ak.simulate(trial=trial, trials=TRIALS, seed=_seed(params), proposed=str(Fraction(str(proposed))))
     cmp = ev.compare
     if isinstance(cmp, dict) and cmp.get("z") is not None:
-        cmp["equal"] = abs(cmp["z"]) <= Z_LIMIT
-        ev.notes.append(f"compare.equal here means the proposed value is consistent with the estimate "
-                        f"(|z| <= {Z_LIMIT:g}); it is not an exact comparison")
+        cmp["consistent"] = abs(cmp["z"]) <= Z_LIMIT
+        ev.notes.append(f"compare.consistent: the proposed value is within |z| <= {Z_LIMIT:g} of the estimate; "
+                        "it is not an exact comparison")
     return ev
 
 
 def generate(rng, knobs):
-    n = knobs.get("n", rng.randint(6, 24))
-    sides = knobs.get("sides", rng.choice([4, 6, 6, 6, 8]))
+    n = knobs.get("n", rng.randint(2, 7))
+    sides = knobs.get("sides", rng.choice([3, 4, 5, 6]))
     p = {"n": n, "sides": sides}
     return {"params": p,
             "statement": (f"A fair ${sides}$-sided die, with faces $1$ to ${sides}$, is rolled repeatedly until the "

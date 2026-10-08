@@ -33,6 +33,11 @@ def _check(algo, target, kind) -> None:
         raise ValueError(f"kind must be one of {list(KINDS)}, got {kind!r}")
 
 
+def validate(algo, target, kind) -> None:
+    """Raise ValueError, as `add` would, when this algo, target or kind would be refused. Writes nothing."""
+    _check(algo, target, kind)
+
+
 def target_matches(target: str, spec: str) -> bool:
     """True when `spec` is this exact target, or a consumer prefix of it: 'osmosis' or 'osmosis:q'."""
     return target == spec or target.startswith(spec.rstrip(":") + ":")

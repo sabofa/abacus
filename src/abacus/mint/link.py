@@ -1,13 +1,18 @@
-"""`abacus mint link`: pair a `create_questions` response with a batch's kept instances and write links (kit/07 s5).
+"""`abacus mint link`: pair a consumer's creation response with a batch's kept instances and write links (kit/07 s5).
 
-The response is `{"created": [{"id", "lineage_id", "prompt_preview"}, ...]}`. Entries are paired with the kept
-instances (decision `keep`, in index order) by order, when there are as many entries as instances and every
-preview agrees with its instance's statement. Otherwise each entry is matched on its prompt preview. Whatever
-cannot be paired is reported, never guessed.
+The consumer's adapter (`adapters/osmosis.py` for Osmosis) turns the response into neutral entries,
+`{remote_id, target, preview}`: the id the consumer gave the item, the link target (`<consumer>:<kind>:<id>`)
+and the start of its prompt. This module knows nothing else about the response.
 
-Each pair gets one `minted` link `osmosis:q:<lineage_id>` (with the algorithm's hash, the instance's seed and
-the batch id), and the batch row records `lineage_id` and `osmosis_id`. Linking the same response again adds
-no second link.
+Entries are paired with the kept instances (decision `keep`, in index order) by order, when there are as many
+entries as instances and every preview agrees with its instance's statement. Otherwise each entry is matched
+on its preview, and an entry whose preview fits more than one free instance is reported as `ambiguous` and
+not linked. Whatever cannot be paired is reported, never guessed.
+
+Each pair gets one `minted` link to the entry's target (with the algorithm's hash, the instance's seed and the
+batch id), and the batch row records `remote_id` and `target`. An instance already linked to that target is
+left as it is. An instance already linked to a different target keeps its first link: the new entry is
+reported as `relinked_conflict` and nothing is written for it. So an instance never has two minted links.
 """
 from __future__ import annotations
 
@@ -15,12 +20,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..adapters import osmosis
 from ..library import links
+from ..library._jsonl import file_lock
 from . import batchfile
 from .review import KEEP
 
-TARGET_PREFIX = "osmosis:q:"
 BAD_ENTRY, COUNT_MISMATCH, NO_MATCH, UNMATCHED = "bad_entry", "count_mismatch", "no_match", "unmatched_instance"
+AMBIGUOUS, RELINKED_CONFLICT, BAD_TARGET = "ambiguous", "relinked_conflict", "bad_target"
+KIND = "minted"
 
 
 def _norm(text: Any) -> str:
@@ -29,7 +37,7 @@ def _norm(text: Any) -> str:
 
 def _preview(entry: dict) -> str:
     """The entry's preview with the ellipsis a truncation leaves removed."""
-    text = _norm(entry.get("prompt_preview"))
+    text = _norm(entry.get("preview"))
     for tail in ("…", "..."):
         if text.endswith(tail):
             text = text[:-len(tail)].rstrip()
@@ -43,88 +51,137 @@ def _agrees(entry: dict, row: dict) -> bool:
     return not p or _norm(row.get("statement")).startswith(p)
 
 
-def read_created(created: Any) -> list[dict]:
-    """The `created` list of a response given as a dict, a JSON string, or the path of a JSON file."""
+def load_response(created: Any) -> Any:
+    """A response given as a dict, a list, a JSON string, or the path of a JSON file, as parsed JSON."""
     if isinstance(created, (str, Path)):
         text = str(created)
         if text.lstrip().startswith(("{", "[")):
-            created = json.loads(text)
+            return json.loads(text)
+        return json.loads(Path(text).read_text(encoding="utf-8-sig"))
+    return created
+
+
+def _label(n: int, entry: dict) -> str:
+    return f"entry {n} ({entry.get('target')})"
+
+
+def _fits(entry: dict, free: list[dict]) -> list[dict]:
+    """The free instances a preview could belong to. An entry with no preview fits none: it says nothing."""
+    return [r for r in free if _preview(entry) and _agrees(entry, r)]
+
+
+def _pair_by_prompt(entries: list[tuple[int, dict]], kept: list[dict],
+                    problems: list[str]) -> list[tuple[dict, dict]]:
+    """Pair on previews. An entry that fits exactly one free instance, and that no other entry wants, takes
+    it; this repeats while it makes progress. What is left is `ambiguous` (it fits several instances, or its
+    one instance is wanted by another entry too) or `no_match`."""
+    free, todo, pairs = list(kept), list(entries), []
+    while todo:
+        fit = {n: _fits(e, free) for n, e in todo}
+        wanted: dict[int, int] = {}
+        for rs in fit.values():
+            if len(rs) == 1:
+                wanted[rs[0]["index"]] = wanted.get(rs[0]["index"], 0) + 1
+        took = [(n, e) for n, e in todo if len(fit[n]) == 1 and wanted[fit[n][0]["index"]] == 1]
+        if not took:
+            break
+        for n, e in took:
+            row = fit[n][0]
+            free.remove(row)
+            todo.remove((n, e))
+            pairs.append((e, row))
+    for n, e in todo:
+        rs = _fits(e, free)
+        if rs:
+            idx = ", ".join(str(r["index"]) for r in rs)
+            why = "another entry fits it too" if len(rs) == 1 else "its preview fits all of them"
+            problems.append(f"{AMBIGUOUS}: {_label(n, e)} could be instance {idx}: {why}; it was not linked")
         else:
-            created = json.loads(Path(text).read_text(encoding="utf-8-sig"))
-    if isinstance(created, list):
-        entries = created
-    elif isinstance(created, dict) and isinstance(created.get("created"), list):
-        entries = created["created"]
-    else:
-        raise ValueError("the response must be {'created': [{id, lineage_id, prompt_preview}, ...]}")
-    return entries
-
-
-def _pair(entries: list[dict], kept: list[dict], problems: list[str]) -> tuple[list[tuple[dict, dict]], str]:
-    """(entry, row) pairs and how they were made: 'order' or 'prompt'."""
-    if len(entries) == len(kept) and all(_agrees(e, r) for e, r in zip(entries, kept)):
-        return list(zip(entries, kept)), "order"
-    if len(entries) != len(kept):
-        problems.append(f"{COUNT_MISMATCH}: the response has {len(entries)} entries and the batch has "
-                        f"{len(kept)} kept instances, so entries were matched on their prompt previews")
-    else:
-        problems.append(f"{NO_MATCH}: an entry's prompt_preview does not start its instance's statement, "
-                        "so entries were matched on their prompt previews instead of by order")
-    free = list(kept)
-    pairs = []
-    for n, e in enumerate(entries, start=1):
-        hit = next((r for r in free if _preview(e) and _agrees(e, r)), None)
-        if hit is None:
-            problems.append(f"{NO_MATCH}: entry {n} (lineage {e.get('lineage_id')!r}) matches no kept instance")
-            continue
-        free.remove(hit)
-        pairs.append((e, hit))
+            problems.append(f"{NO_MATCH}: {_label(n, e)} matches no kept instance")
     for r in free:
         problems.append(f"{UNMATCHED}: instance {r['index']} was not paired with any entry")
-    return pairs, "prompt"
+    return pairs
+
+
+def _pair(entries: list[tuple[int, dict]], kept: list[dict],
+          problems: list[str]) -> tuple[list[tuple[dict, dict]], str]:
+    """(entry, row) pairs and how they were made: 'order' or 'prompt'."""
+    if len(entries) == len(kept) and all(_agrees(e, r) for (_, e), r in zip(entries, kept)):
+        return [(e, r) for (_, e), r in zip(entries, kept)], "order"
+    if len(entries) != len(kept):
+        problems.append(f"{COUNT_MISMATCH}: the response has {len(entries)} entries and the batch has "
+                        f"{len(kept)} kept instances, so entries were matched on their previews")
+    else:
+        problems.append(f"{NO_MATCH}: an entry's preview does not start its instance's statement, "
+                        "so entries were matched on their previews instead of by order")
+    return _pair_by_prompt(entries, kept, problems), "prompt"
+
+
+def _existing_targets(row: dict, batch: str) -> set[str]:
+    """The targets this instance (same algorithm, batch and seed) already has a minted link to."""
+    found = {x["target"] for x in links.list_links(algo=row["algo"])
+             if x["kind"] == KIND and x.get("batch") == batch and x.get("seed") == row.get("seed")}
+    if isinstance(row.get("target"), str):
+        found.add(row["target"])
+    return found
 
 
 def link_batch(batch_ref, created: Any) -> tuple[Path, dict]:
-    """Write the links and record the lineage ids in the batch file. Returns its path and a summary:
+    """Write the links and record the targets in the batch file. Returns its path and a summary:
     `{batch, path, matched_by, linked, already_linked, problems: [{code, message}]}`.
 
-    ValueError for a response that is not a `created` list; NoSuchBatch and BadBatch as for `review`.
-    A malformed entry, a count mismatch and an unpaired instance are reported as problems.
+    ValueError for a response that is not a `created` list (nothing is written); NoSuchBatch and BadBatch as
+    for `review`. A malformed entry, a count mismatch, an unpaired instance, an ambiguous entry and a
+    conflict with an earlier link are reported as problems. Every target is checked before anything is
+    written, and the batch file is held under the lock `review` takes.
     """
-    entries = read_created(created)
+    entries = osmosis.parse_created(load_response(created))
     path = batchfile.resolve(batch_ref)
+    with file_lock(path):
+        return _link_locked(path, entries)
+
+
+def _link_locked(path: Path, entries: list[dict]) -> tuple[Path, dict]:
     head, rows = batchfile.read(path)
     batch = batchfile.batch_id(path, head)
     kept = sorted((r for r in rows if r.get("decision", KEEP) == KEEP), key=lambda r: r["index"])
 
     problems: list[str] = []
-    good = []
+    good: list[tuple[int, dict]] = []
     for n, e in enumerate(entries, start=1):
-        lineage = e.get("lineage_id") if isinstance(e, dict) else None
-        if isinstance(lineage, str) and lineage.strip():
-            good.append(e)
+        if e["target"]:
+            good.append((n, e))
         else:
-            problems.append(f"{BAD_ENTRY}: entry {n} has no lineage_id, so it was skipped")
+            problems.append(f"{BAD_ENTRY}: entry {n} has no link target, so it was skipped")
     pairs, how = _pair(good, kept, problems)
 
-    linked = already = 0
+    todo, already = [], 0
     for e, row in pairs:
-        target = TARGET_PREFIX + e["lineage_id"].strip()
-        row["lineage_id"], row["osmosis_id"] = e["lineage_id"].strip(), e.get("id")
-        same = [x for x in links.find(target) if x["algo"] == row["algo"] and x["kind"] == "minted"
-                and x.get("batch") == batch]
-        if same:
-            already += 1
+        try:
+            links.validate(row["algo"], e["target"], KIND)
+        except ValueError as err:
+            problems.append(f"{BAD_TARGET}: {err}")
             continue
-        links.add(row["algo"], target, "minted", algo_hash=row.get("algo_hash"), seed=row.get("seed"), batch=batch)
-        linked += 1
-    if pairs:
+        have = _existing_targets(row, batch)
+        if e["target"] in have:
+            already += 1
+            row["remote_id"], row["target"] = e["remote_id"], e["target"]
+        elif have:
+            problems.append(f"{RELINKED_CONFLICT}: instance {row['index']} is already linked to "
+                            f"{', '.join(sorted(have))}; the new entry's target {e['target']} was not linked")
+        else:
+            todo.append((e, row))
+
+    for e, row in todo:
+        links.add(row["algo"], e["target"], KIND, algo_hash=row.get("algo_hash"), seed=row.get("seed"), batch=batch)
+        row["remote_id"], row["target"] = e["remote_id"], e["target"]
+    if todo or already:
         batchfile.write_atomic(path, batchfile.render(head, rows))
-    return path, {"batch": batch, "path": str(path), "matched_by": how, "linked": linked,
+    return path, {"batch": batch, "path": str(path), "matched_by": how, "linked": len(todo),
                   "already_linked": already,
                   "problems": [dict(zip(("code", "message"), p.partition(": ")[::2])) for p in problems]}
 
 
 def link(batch_ref, created: Any) -> Path:
-    """Link a batch to a `create_questions` response and return the batch file's path. See `link_batch`."""
+    """Link a batch to a creation response and return the batch file's path. See `link_batch`."""
     return link_batch(batch_ref, created)[0]
