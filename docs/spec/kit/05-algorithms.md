@@ -43,7 +43,7 @@ META = {
 | Role | Signature | Returns |
 |---|---|---|
 | `compute` | `compute(params) -> answer` | the answer for the given params |
-| `check` | `check(params, proposed) -> Evidence` | evidence about a proposed answer, usually by a different route from `compute` |
+| `check` | `check(params, proposed) -> Evidence` | evidence about a proposed answer, usually by a different route from `compute`. How `mint make` and `lint` read it (`algo/agree.py`): `compare.equal` True agrees; else `compare.consistent` True agrees (a sampled check, such as `simulate`, keeps its exact `equal` and may add its own `consistent` judgement, so the kit hard-codes no statistical threshold); else an explicit False in `compare` disagrees; else a bool `result`; else no verdict |
 | `generate` | `generate(rng, knobs) -> Instance` | one instance. It must use only `rng` for randomness |
 | `solution` | `solution(instance) -> list[Step]` | worked steps (§5); a stretch goal |
 | `demo` | `demo(instance) -> Show` | a show payload for live sessions (`live/05`) |

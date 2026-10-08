@@ -14,7 +14,7 @@ abacus mint review <batch> --drop 3,17 --note 5 "too easy"   (or the AI edits th
 abacus mint export <batch> --to osmosis --tags t1,t2 [--node-key k]
                                                              → library/batches/<batch-id>.osmosis.json
     the AI submits that payload with Osmosis create_questions (or scripts/mcp-batch)
-abacus mint link <batch> --created <create_questions response>.json   → links.jsonl
+abacus mint link <batch> --created <creation response>.json   → links.jsonl
 ```
 
 **Nothing here calls Osmosis.** abacus writes payloads and reads responses. The AI, which holds the Osmosis connection, sends them. That keeps the core free of any consumer (principle 5).
@@ -65,6 +65,8 @@ The batch-level `idempotency_key` is the batch id, so re-sending a batch creates
 
 ## 5. `mint link`
 
-`mint link` reads the `create_questions` response (`created: [{id, lineage_id, prompt_preview}]`) and pairs each entry with a kept instance.
-- **Matching:** by order. The build must confirm that Osmosis returns `created` in input order; if it doesn't, match on the prompt.
-- **Output:** one `minted` link per question (`osmosis:q:<lineage_id>`), and the lineage id recorded in the batch.
+`mint link` reads the consumer's creation response and pairs each entry with a kept instance. The adapter (`adapters/osmosis.py`) turns the response into neutral entries `{remote_id, target, preview}`; for Osmosis, `created: [{id, lineage_id, prompt_preview}]` becomes `remote_id = id`, `target = osmosis:q:<lineage_id>`. Only the adapter knows the response's field names.
+- **Matching:** by order is primary. When the counts differ or the previews don't agree, match on the preview, and an entry that fits more than one free instance is flagged `ambiguous` and not linked. Entries and instances left over are reported (`no_match`, `unmatched_instance`).
+- **Output:** one `minted` link per question, and `remote_id` and `target` recorded in the batch row.
+- **Relinking:** the same response twice adds nothing. An instance that already has a different target keeps its first link, and the new one is flagged `relinked_conflict`. Every target is validated before anything is written (`bad_target`).
+- **Locking:** `link` and `review` take the same batch file lock.
