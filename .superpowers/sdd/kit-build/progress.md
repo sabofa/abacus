@@ -12,9 +12,9 @@
 | T2 Surfaces | [x] | 93d40ce c4e2f5b a030c95; fixes bf16f47, f92e19f | 2 rounds (Sonnet); round 2 (the thread-safe flush) has a deterministic test but no re-review: the cap was reached |
 | T3 Buttons: arithmetic and algebra | [x] | 8c6e573; fixes fda71bc, e7eb791 | READY after 2 rounds (Sonnet). Round 1: 1 critical (parser string-eval) + 3 important. A payload-hunting re-review was cut short by a safety classifier; the hardening round (e7eb791) added no-attribute-access, no sympify of strings in compare, validated identity vars. Final defensive re-review: READY |
 | T4 Buttons: counting and discrete math | [x] | a9790c2; fix 6697a1b | READY after 1 round (Sonnet). Round 1 had 3 important; the re-review confirmed all fixed |
-| T5 Buttons: probability and quant | [ ] | | |
-| T6 Buttons: continuous math | [ ] | | |
-| T7 Buttons: CS | [ ] | | |
+| T5 Buttons: probability and quant | [x] | 0c137db; fix a61e8d0 | READY after 1 round (Sonnet). Round 1 had 1 critical (float-to-fraction snap turned 3.3e-14 into 0 and hitting returned inf) + 4 important; re-review confirmed all fixed |
+| T6 Buttons: continuous math | [~] **OPEN FINDING (capped)** | c8f2826; fixes ead8c67, 7793247 | 2 rounds (Sonnet). Round 1: 2 critical (divergent sums and infinite integrals reported as converged to 30 digits). Round 2 re-review: all confirmed fixed except **one Important regression: a narrow integrand far from the origin returns a confident wrong value.** `numeric(integral, exp(-(x-5000)**2), -oo..oo, digits=20)` gives value 0, reliable_digits 20, complete True, no flag (true value sqrt(pi)). Same for (x-1000) over -oo..oo and (x-5000) over 0..oo. Cause: geometric splits stop at 2^11 / 3^7 so the peak is never sampled. The old code returned no_convergence for these. Suggested fix: flag `zero_from_unsampled_tail`/withhold the value when an infinite-range integral comes out ~0 with an error far below the integrand's scale, or extend the reach to ~1e4. Cap reached: needs Ben's go-ahead or the next chat |
+| T7 Buttons: CS | [~] built (cc0cba8); round-1 fixer running | cc0cba8 | Round 1 NOT READY: 6 important (growth completeness after a cut; growth default fit flagged unreliable; diff_test shrink-timeout sets complete=False; no float tolerance; any two exceptions agree; stale partial on hang) |
 | T8 Algorithm format | [x] | 522003c ae8f26a 1005b75; fixes 42e4c64, c127ca0 | READY after 2 rounds (Sonnet) | 522003c ae8f26a 1005b75; fixes 42e4c64 | Round 1 (Sonnet): NOT READY, 1 critical + 6 important. Re-review of 42e4c64: all fixed; 1 important left (mixed tuple/list equality) + minors, sent to round 2 (the cap). The T9 review checks the round-2 commit |
 | T9 Library | [x] | 0f76ae3 077bbc2 2b1cd50; fixes 7e42f2b, dd46621 | 2 rounds (Sonnet). Round 1's 4 important + 3 extras were READY on re-review. Round 2 (dd46621: child stdout → stderr, stale-lock race, startup_timeout usage) has tests but no re-review: the cap was reached |
 | T10 Minting and examples | [x] T10.1 + T10.2 · T10.3 waits on B1 | 7fc2653 cf32ab6; fixes 7a23fac, 8af1006 | 2 rounds (Sonnet). Round 1 had 2 important; its re-review left 1 (the link-fallback test). Round 2 (8af1006) has tests but no re-review: the cap was reached |
@@ -27,9 +27,9 @@ Each subtask's goal, files, test and acceptance line are in the plan. Copy them 
 - [x] T2.1  - [x] T2.2  - [x] T2.3
 - [x] T3.1  - [x] T3.2  - [x] T3.3
 - [x] T4.1  - [x] T4.2  - [x] T4.3
-- [ ] T5.1  - [ ] T5.2  (next)
-- [ ] T6.1  - [ ] T6.2  - [ ] T6.3
-- [ ] T7.1  - [ ] T7.2
+- [x] T5.1  - [x] T5.2
+- [x] T6.1  - [x] T6.2  - [x] T6.3
+- [x] T7.1  - [x] T7.2
 - [x] T8.1  - [x] T8.2  - [x] T8.3 (1005b75)
 - [x] T9.1  - [x] T9.2  - [x] T9.3 (2b1cd50)
 - [x] T10.1 - [x] T10.2 (cf32ab6) - [ ] T10.3 (waits on B1: the examples call buttons)
@@ -74,3 +74,6 @@ Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both
 - A safety classifier cut short a hostile-payload review of the parser. Don't re-run payload-hunting reviews; use defensive code review and ordinary tests.
 - T4 re-review minors (logged): `capped_at_k` is set even when the k-th counterexample was the last point; two child-process test assertions still accept "before any progress".
 - T3 final-review minors (logged): `Matrix` is in the parser whitelist but `exact` now rejects it (not a sp.Basic): allow sp.MatrixBase or drop Matrix; the mod fast path has no tests for 0**0, mod 1 and negative exponents (hand-checked right); **mint/make.py:121 still calls sympy.sympify on an answer string** (behind _costly + try/except): route it through parsing.parse_expr; `__x` is a legal identifier for identity `vars`.
+- T5 re-review minors (logged): VECTOR_CHUNK=65536 can't be interrupted (wide vectorized trials overshoot the budget, ~524MB per chunk); one test asserts only truthiness for Rng.sample.
+- T6 round-2 minors (logged): `exp(-(x-200)**2)` over -oo..oo and similar are convergent but flagged no_convergence (honest false rejection); `exp(-(x-50)**2)` reports 18 digits, true error 10^-17.82 (about 0.2 digit over-stated).
+- A T6 builder ran `pkill -f python` once in Git Bash to stop a hung script: it could have killed other agents' Python processes. Agents are now told not to kill processes.
