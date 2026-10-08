@@ -1,0 +1,49 @@
+{
+  "created": [
+    {
+      "id": "q_26215a7a",
+      "lineage_id": "ln_1a47821c",
+      "prompt_preview": "Find the remainder when $2^{5^{7}}$ is divided b…"
+    },
+    {
+      "id": "q_d8de0e1c",
+      "lineage_id": "ln_24419e60",
+      "prompt_preview": "Find the remainder when $14^{18^{9}}$ is divided…"
+    },
+    {
+      "id": "q_4180d790",
+      "lineage_id": "ln_533271fb",
+      "prompt_preview": "Find the remainder when $69^{4^{3}}$ is divided …"
+    },
+    {
+      "id": "q_294c8f4d",
+      "lineage_id": "ln_293d1223",
+      "prompt_preview": "Find the remainder when $55^{17^{2}}$ is divided…"
+    },
+    {
+      "id": "q_5144bbd0",
+      "lineage_id": "ln_317bee9f",
+      "prompt_preview": "Find the remainder when $58^{7^{9}}$ is divided …"
+    },
+    {
+      "id": "q_21b39bd3",
+      "lineage_id": "ln_74ea054d",
+      "prompt_preview": "Find the remainder when $94^{8^{6}}$ is divided …"
+    },
+    {
+      "id": "q_7f0b5406",
+      "lineage_id": "ln_1928a48e",
+      "prompt_preview": "Find the remainder when $94^{15^{8}}$ is divided…"
+    },
+    {
+      "id": "q_7c085061",
+      "lineage_id": "ln_f7fd1fe9",
+      "prompt_preview": "Find the remainder when $85^{5^{7}}$ is divided …"
+    },
+    {
+      "id": "q_7914009c",
+      "lineage_id": "ln_42552a76",
+      "prompt_preview": "Find the remainder when $49^{13^{2}}$ is divided…"
+    }
+  ]
+}

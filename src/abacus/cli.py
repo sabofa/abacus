@@ -380,6 +380,16 @@ def _mint_export(a) -> int:
     return 0 if ev.result is not None else 2  # no payload was written
 
 
+def _mint_link(a) -> int:
+    try:
+        created = json.loads(Path(a.created).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        return _err(f"cannot read --created {a.created!r}: {e}")
+    ev = budget.call("mint_link", {"batch": a.batch, "created": created}, time_s=a.time)
+    _emit(ev, a.pretty, a.full)
+    return 0 if ev.result is not None else 2  # nothing was linked
+
+
 def _mint(rest: list[str]) -> int:
     p = argparse.ArgumentParser(prog="abacus mint", description="Batches of generated problems.")
     sub = p.add_subparsers(dest="sub", required=True)
@@ -403,6 +413,10 @@ def _mint(rest: list[str]) -> int:
     ex.add_argument("--node-key", action="append", default=[], metavar="KEY", help="a node key (node:...); repeatable")
     ex.add_argument("--family", default=None, metavar="FAMILY_ID", help="add this family_id to every question, for pools")
     _common(ex)
+    ln = sub.add_parser("link", help="pair a create_questions response with a batch and write links; prints Evidence JSON")
+    ln.add_argument("batch", metavar="BATCH", help="a batch id or a batch file")
+    ln.add_argument("--created", required=True, metavar="FILE", help="the create_questions response, as a JSON file")
+    _common(ln)
     a, code = _parse(p, rest)
     if a is None:
         return code
@@ -410,6 +424,8 @@ def _mint(rest: list[str]) -> int:
         return _mint_review(a)
     if a.sub == "export":
         return _mint_export(a)
+    if a.sub == "link":
+        return _mint_link(a)
     knobs: dict = {}
     for item in a.knob:
         name, eq, value = item.partition("=")

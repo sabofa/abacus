@@ -9,11 +9,12 @@ from .. import registry
 from ..algo.loader import AlgoImportError, MetaError
 from ..evidence import Evidence
 from ..library import store
-from . import batchfile, export as _export, make as _make, review as _review
+from . import batchfile, export as _export, link as _link, make as _make, review as _review
 
 BUTTON = "mint_make"
 REVIEW = "mint_review"
 EXPORT = "mint_export"
+LINK = "mint_link"
 BUDGET_SHARE = 0.8  # make stops starting attempts here, leaving the rest to write the file and answer
 
 
@@ -161,6 +162,37 @@ def mint_export(inp: dict, ctx) -> Evidence:
     q = info["questions"]
     ev = Evidence(button=EXPORT, result=info, method="timed",
                   scope=f"exported {q} kept instance{'s' if q != 1 else ''} to {path.name}; {info['dropped']} dropped")
+    for p in problems:
+        ev.flag(p["code"], p["message"])
+    return ev
+
+
+@registry.button(
+    LINK,
+    description="Link a batch to the Osmosis create_questions response that came back for its export. `batch` is "
+                "a batch id or a path; `created` is the response (an object with a `created` list of "
+                "{id, lineage_id, prompt_preview}). Entries are paired with the kept instances by order when the "
+                "counts match and every preview starts its instance's statement; otherwise on the previews. Each "
+                "pair gets a `minted` link osmosis:q:<lineage_id> carrying the algorithm hash, the instance seed "
+                "and the batch id, and the batch row records lineage_id and osmosis_id. Linking the same response "
+                "again adds nothing. Entries without a lineage_id, count mismatches and unpaired instances come "
+                "back as flags (bad_entry, count_mismatch, no_match, unmatched_instance).",
+    input_schema={
+        "type": "object",
+        "properties": {"batch": {"type": "string"}, "created": {"type": "object"}},
+        "required": ["batch", "created"],
+    },
+    default_time_s=30,
+)
+def mint_link(inp: dict, ctx) -> Evidence:
+    try:
+        path, info = _link.link_batch(inp["batch"], inp["created"])
+    except (ValueError, OSError) as e:
+        return _batch_fail(LINK, e)
+    problems = info.pop("problems")
+    ev = Evidence(button=LINK, result=info, method="timed",
+                  scope=f"linked {info['linked']} instance{'s' if info['linked'] != 1 else ''} of {path.name} "
+                        f"(matched by {info['matched_by']}); {info['already_linked']} already linked")
     for p in problems:
         ev.flag(p["code"], p["message"])
     return ev
