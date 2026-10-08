@@ -17,7 +17,7 @@
 | T7 Buttons: CS | [x] (cap reached) | cc0cba8; fixes e764074, 0fdaeb1 | 2 rounds (Sonnet). Round 1: 6 important. Round-1 re-review: growth fixes held; 2 important left (stale in-flight claim after the first 50 inputs named the wrong function; growth dropped-half spike unflagged), both fixed in round 2 (0fdaeb1) with tests but no re-review |
 | T8 Algorithm format | [x] | 522003c ae8f26a 1005b75; fixes 42e4c64, c127ca0 | READY after 2 rounds (Sonnet) | 522003c ae8f26a 1005b75; fixes 42e4c64 | Round 1 (Sonnet): NOT READY, 1 critical + 6 important. Re-review of 42e4c64: all fixed; 1 important left (mixed tuple/list equality) + minors, sent to round 2 (the cap). The T9 review checks the round-2 commit |
 | T9 Library | [x] | 0f76ae3 077bbc2 2b1cd50; fixes 7e42f2b, dd46621 | 2 rounds (Sonnet). Round 1's 4 important + 3 extras were READY on re-review. Round 2 (dd46621: child stdout → stderr, stale-lock race, startup_timeout usage) has tests but no re-review: the cap was reached |
-| T10 Minting and examples | [~] T10.1–T10.2 done; T10.3 built (665bd85), review round 1 NOT READY, fixer running | 7fc2653 cf32ab6; fixes 7a23fac, 8af1006 | 2 rounds (Sonnet). Round 1 had 2 important; its re-review left 1 (the link-fallback test). Round 2 (8af1006) has tests but no re-review: the cap was reached |
+| T10 Minting and examples | [x] | 7fc2653 cf32ab6 665bd85; fixes 7a23fac, 8af1006, eb24fe5, a33e82d | T10.1–T10.2: 2 rounds (Sonnet). T10.3 (mint link + 3 examples + e2e): round 1 NOT READY, 4 important; re-review of eb24fe5 READY with 1 important (check_agrees rule order), fixed directly in a33e82d |
 
 ## Subtasks
 
@@ -32,7 +32,7 @@ Each subtask's goal, files, test and acceptance line are in the plan. Copy them 
 - [x] T7.1  - [x] T7.2
 - [x] T8.1  - [x] T8.2  - [x] T8.3 (1005b75)
 - [x] T9.1  - [x] T9.2  - [x] T9.3 (2b1cd50)
-- [x] T10.1 - [x] T10.2 (cf32ab6) - [~] T10.3 (665bd85)
+- [x] T10.1 - [x] T10.2 (cf32ab6) - [x] T10.3 (665bd85, eb24fe5, a33e82d)
 
 ## Deltas from the spec
 
@@ -64,17 +64,15 @@ Record each one here, and in Learn `build/abacus/DELTA-FROM-SPEC.md` once that f
 - mint make runs roles in-process for speed. The button's child budget bounds the whole batch.
 - Usage is recorded from budget.call (algo_run), once per role run.
 
-## Stop point, 2026-10-07 (abacus chat)
-Everything not blocked is built and reviewed: T1, T2, T8, T9, T10.1, T10.2. Full suite: 562 passing at dd46621.
-Blocked: T3–T7 (buttons) and T10.3 (the example algorithms call buttons). Both wait on Ben's B1.
-- T3 review minors (logged): Domain.sample float-bound edge (~5e-18 outside); finite integer domains stay `unknown` after exhaustive agreement.
-- B1 answered 2026-10-07: keep all 14 buttons (T3–T7 + T10.3 unblocked; construct waits on spec 3). B2: no Lean/prover for now. B3: one-time expert rating of 10–20 problems (rating sheet still to prepare). B4: OEIS off. B5: Osmosis keeps tech:, abacus uses technique:.
-- T4 round-1 minors (logged): DESCRIPTION strings don't mention the new result keys (capped, unlisted_unsupported, margin_errors, capped_at_k).
-- A test in tests/test_kit_algebra.py (test_exact_mod_of_a_huge_power_finishes_without_building_it) failed once during the T4 fixer's full run, while the T3 hardening fixer was mid-edit. Re-check when the hardening commit lands.
-- A safety classifier cut short a hostile-payload review of the parser. Don't re-run payload-hunting reviews; use defensive code review and ordinary tests.
-- T4 re-review minors (logged): `capped_at_k` is set even when the k-th counterexample was the last point; two child-process test assertions still accept "before any progress".
-- T3 final-review minors (logged): `Matrix` is in the parser whitelist but `exact` now rejects it (not a sp.Basic): allow sp.MatrixBase or drop Matrix; the mod fast path has no tests for 0**0, mod 1 and negative exponents (hand-checked right); **mint/make.py:121 still calls sympy.sympify on an answer string** (behind _costly + try/except): route it through parsing.parse_expr; `__x` is a legal identifier for identity `vars`.
-- T5 re-review minors (logged): VECTOR_CHUNK=65536 can't be interrupted (wide vectorized trials overshoot the budget, ~524MB per chunk); one test asserts only truthiness for Rng.sample.
-- T6 round-2 minors (logged): `exp(-(x-200)**2)` over -oo..oo and similar are convergent but flagged no_convergence (honest false rejection); `exp(-(x-50)**2)` reports 18 digits, true error 10^-17.82 (about 0.2 digit over-stated).
-- A T6 builder ran `pkill -f python` once in Git Bash to stop a hung script: it could have killed other agents' Python processes. Agents are now told not to kill processes.
-- T10.3 review round 1 (NOT READY): 4 important: Osmosis field names leaked outside the adapter (mint/link.py, mint/surface.py); a different response for the same batch left stale links; the prompt fallback guessed between look-alike instances without a flag; the dice example's answer had a 15-digit denominator. The reviewer also proposed replacing the dice example's `compare.equal = |z|<=3` with a generic `check_agrees` helper (equal → consistent → result bool) used by `mint make` and `lint`. The fixer was told to adopt it.
+## Stop point 2, 2026-10-07 (abacus chat)
+Built: everything in the plan except `construct`, signals and the solution role. 13 of 14 buttons exist (`exact cas identity enumerate sequence counterexample simulate markov identify extremum numeric diff_test growth`), plus the algorithm format, library, minting, the Osmosis adapter and three example algorithms. `PENDING` in tests/test_surfaces_agree.py is just `construct`.
+Reviewed READY: T1, T2, T3, T4, T5, T8, T9, T10. Open: **T6 (one Important finding, see its row)**. T7 is done at the cap (round 2 not re-reviewed).
+Unreviewed round-2 commits (cap): f92e19f (T2), dd46621 (T9), 8af1006 (T10), 0fdaeb1 (T7), 7793247 (T6, re-reviewed with the one finding above).
+
+## Deltas added during the build (second batch)
+- `abacus.kit` is a module subclass: `ak.<button>` resolves to a wrapper even after the button's submodule is imported (so `import abacus.kit.exact as m` gives the wrapper; use `from abacus.kit.exact import x`).
+- The expression parser rejects quotes and attribute access (a `.` outside a numeric literal) and has no string-evaluating names (S, sympify, symbols, parse_expr). Code fields (`trial`, `step`, `f` as code, `fast`/`reference`, `inputs`) are executed by design: the sandbox is the AI's own Python.
+- `check_agrees` (algo/agree.py) is the one reading of a check's Evidence for `mint make` and `lint`: equal True, consistent True, explicit False, bool result, else no verdict. Sampled checks keep `compare.equal` exact and may add `compare.consistent`.
+- `mint link` parses the creation response through the adapter into neutral {remote_id, target, preview}; it flags `ambiguous`, `no_match`, `unmatched_instance`, `relinked_conflict`, `bad_target`.
+- `markov` solves games up to 40x40 by an exact simplex over fractions; floats read as fractions only within 1e-15 relative.
+- `numeric` flags divergent sums and non-convergent infinite integrals with no value and no digits.
