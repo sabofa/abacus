@@ -135,6 +135,7 @@ class _Fn:
         self.ctx = ctx
         self.calls = 0
         self.peak = mp.mpf(0)   # the largest |f| seen at a one-variable argument within PEAK_RANGE of the origin
+        self.seen = mp.mpf(0)   # the largest |f| the quadrature evaluated at any one-variable argument
 
     def __call__(self, *a):
         self.calls += 1
@@ -146,6 +147,7 @@ class _Fn:
         r = self.f(*a)
         if len(a) == 1:
             try:
+                self.seen = max(self.seen, abs(r))
                 if abs(a[0]) <= PEAK_RANGE:
                     self.peak = max(self.peak, abs(r))
             except (TypeError, ValueError):
@@ -210,6 +212,33 @@ def _finite_scale(f, a, b) -> mp.mpf:
     return best
 
 
+REACH = 10 ** 8          # an infinite range is probed on a log-spaced grid out to this distance from the finite end (or 0)
+DECAY_RATIO = 1e-6       # |f| at the outermost probes above this fraction of its observed maximum: decay is unconfirmed
+
+
+def _reach_probe(f, a, b):
+    """Sample the integrand on a log-spaced grid (four points per decade, 0.01 to REACH) in each infinite direction.
+    Returns (largest |f| seen anywhere, including the quadrature's own samples near the origin; largest |f| among the
+    outermost probes, 10^7 to REACH). Points where f cannot be evaluated are skipped."""
+    offsets = [mp.mpf(10) ** (mp.mpf(k) / 4) for k in range(-8, 33)]
+    starts = []
+    if b == mp.inf:
+        starts.append((a if a != -mp.inf else mp.mpf(0), 1))
+    if a == -mp.inf:
+        starts.append((b if b != mp.inf else mp.mpf(0), -1))
+    best, outer = f.peak, mp.mpf(0)
+    for x0, sgn in starts:
+        for t in offsets:
+            try:
+                v = abs(f.f(x0 + sgn * t))
+            except (ZeroDivisionError, ValueError, ArithmeticError, TypeError):
+                continue
+            best = max(best, v)
+            if t >= mp.mpf(10) ** 7:
+                outer = max(outer, v)
+    return best, outer
+
+
 def _op_integral(inp, ctx, digits):
     _need(inp, "expr", "var", "lo", "hi")
     v = _name(inp["var"])
@@ -266,11 +295,43 @@ def _op_integral(inp, ctx, digits):
                          "(absolute, about 1) was not trusted next to a value this large",
                          "an oscillating integrand that does not decay has no limit; one that decays only through "
                          "oscillation (cos(x**2), sin(x)/x) converges but is out of reach of this quadrature"])
+        seen = f.seen   # what the quadrature itself evaluated, before the probes
+        top, outer = _reach_probe(f, a, b)
+        rng = f"[{inp['lo']}, {inp['hi']}]"
+        cannot = (f"the integrand was sampled out to |x| <= {REACH:.0e} (from the finite end, or from 0); mass beyond "
+                  f"that, or in a narrow peak between the sampled points, cannot be ruled out")
+        blind = top > mp.mpf(10) ** -(digits + GUARD) and seen * 1000 < top
+        if top <= mp.mpf(10) ** -(digits + GUARD) or blind:
+            raise _Fail("no_mass_observed",
+                        f"the integral over {rng} cannot be confirmed: "
+                        + (f"the probes found the integrand as large as {mp.nstr(top, 3)} where the quadrature saw at "
+                           f"most {mp.nstr(seen, 3)}, so it missed the mass" if blind else
+                           f"the integrand is zero or negligible (at most {mp.nstr(top, 3)}) everywhere it was sampled")
+                        + f", and the computed value ({mp.nstr(val, 3)}) says nothing about a peak the sampling missed",
+                        f"integral of {inp['expr']} over {rng}: no value reported. {cannot}. Nothing non-negligible was "
+                        f"seen, so the mass may lie outside the sampled region",
+                        ["the splits of the quadrature and a log-spaced probe grid all saw a negligible integrand; a "
+                         "narrow peak far from the origin (such as exp(-(x-5000)**2)) is invisible to both, and the "
+                         "quadrature would return 0 with a clean error estimate; nothing is reported rather than that"])
+        if outer > top * mp.mpf(DECAY_RATIO):
+            raise _Fail("unconfirmed_decay",
+                        f"the integral over {rng} cannot be confirmed: the integrand is still {mp.nstr(outer, 3)} at "
+                        f"the outermost sampled points (|x| up to {REACH:.0e}) against {mp.nstr(top, 3)} at its largest, "
+                        f"so it is not known to decay inside the sampled reach",
+                        f"integral of {inp['expr']} over {rng}: no value reported. {cannot}. The integrand was not "
+                        f"negligible at the outermost sampled points",
+                        ["an integral over an infinite range is reported only when the integrand is seen to be "
+                         "negligible at the edge of the sampled reach"])
+        notes.append(f"infinite-range result covers the sampled reach only: integrand sampled out to |x| <= {REACH:.0e}; "
+                     f"mass beyond that cannot be ruled out")
         notes.append("an infinite range is mapped to a finite one by mpmath's tanh-sinh scheme and computed twice on "
                      "different splits; the error is the larger of mpmath's estimate and the disagreement of the two "
                      "runs, an estimate and not a bound")
     scope = (f"mpmath tanh-sinh quadrature of {inp['expr']} over [{inp['lo']}, {inp['hi']}] at {digits + GUARD} "
              f"working digits ({f.calls} evaluations)")
+    if infinite:
+        scope += (f"; integrand sampled out to |x| <= {REACH:.0e}, and mass beyond that cannot be ruled out "
+                  f"(an infinite-range result covers the sampled reach only)")
     return _Out([val], [err], scope=scope, notes=notes)
 
 
@@ -713,7 +774,9 @@ def _fmt(v, n: int) -> str:
                 "(solve expr == 0 from x0 or a bracket, or a system), ode (an initial-value problem y' = expr, "
                 "y(t0) = y0, evaluated at `at`). Returns the value with its digits and an error estimate, and "
                 "notes when convergence is slow or the estimate is large (then fewer digits are shown). "
-                "The estimate is a self-check, not a proof.",
+                "The estimate is a self-check, not a proof. An infinite-range integral covers the sampled reach only "
+                "(the integrand is probed out to |x| <= 1e8): it is reported without a value, flagged "
+                "no_mass_observed or unconfirmed_decay, when the mass may lie outside that reach.",
     input_schema=_SCHEMA,
 )
 def numeric(inp: dict, ctx) -> Evidence:

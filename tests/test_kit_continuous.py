@@ -695,3 +695,48 @@ def test_numeric_flagged_finite_divergent_integral_carries_no_digits():
 def test_numeric_root_with_equal_ends_and_equal_signs_is_no_sign_change_not_bad_input():
     ev = run("numeric", op="root", expr="x**2 - 4", var="x", x0=["-3", "3"])
     assert "bad_input" not in codes(ev) and "no_sign_change" in codes(ev), (ev.flags, ev.result)
+
+
+# ---------------------------------------------------------------- infinite range: mass outside the sampled reach
+
+
+@pytest.mark.parametrize("expr,lo", [
+    ("exp(-(x - 5000)**2)", "-oo"),
+    ("exp(-(x - 1000)**2)", "-oo"),
+    ("exp(-(x - 5000)**2)", "0"),
+])
+def test_numeric_infinite_integral_with_mass_outside_the_sampled_reach_is_withheld(expr, lo):
+    # sqrt(pi) was reported as 0 with 20 reliable digits: the splits and the scale probe never saw the far peak
+    ev = run("numeric", op="integral", expr=expr, var="x", lo=lo, hi="oo", digits=20)
+    assert _value(ev) is None, ev.result
+    assert ev.complete is False
+    assert (ev.result or {}).get("reliable_digits", 0) == 0
+    assert "error_estimate" not in (ev.result or {}) and (ev.precision or {}).get("digits", 0) == 0
+    assert "no_mass_observed" in codes(ev), ev.flags
+    assert "sampled" in ev.scope and "cannot be ruled out" in ev.scope
+
+
+@pytest.mark.parametrize("expr,lo,hi,true", [
+    ("exp(-x**2)", "-oo", "oo", lambda: mp.sqrt(mp.pi)),
+    ("exp(-(x - 20)**2)", "-oo", "oo", lambda: mp.sqrt(mp.pi)),
+    ("exp(-(x - 50)**2)", "-oo", "oo", lambda: mp.sqrt(mp.pi)),
+    ("1/(1 + x**2)", "0", "oo", lambda: mp.pi / 2),
+    ("x**2*exp(-x)", "0", "oo", lambda: mp.mpf(2)),
+    ("1/x**2", "1", "oo", lambda: mp.mpf(1)),
+])
+def test_numeric_spikes_and_tails_inside_the_reach_still_compute_and_state_the_reach(expr, lo, hi, true):
+    ev = run("numeric", op="integral", expr=expr, var="x", lo=lo, hi=hi, digits=20)
+    assert ev.complete is True and ev.result["reliable_digits"] >= 15, (ev.flags, ev.result)
+    with mp.workdps(60):
+        t = true()
+        assert abs(mpv(ev, 60) - t) <= abs(t) * mp.mpf(10) ** -15
+    assert "|x| <=" in ev.scope and "cannot be ruled out" in ev.scope
+    assert "sampled reach only" in notes(ev)
+
+
+def test_numeric_infinite_integral_not_known_to_decay_in_the_reach_is_withheld():
+    # exp(-1e-9 x) is still ~0.9 at the edge of the sampled reach: the answer (1e9) depends on unsampled mass
+    ev = run("numeric", op="integral", expr="exp(-x/10**9)", var="x", lo="0", hi="oo", digits=20)
+    assert _value(ev) is None and ev.complete is False
+    assert (ev.result or {}).get("reliable_digits", 0) == 0
+    assert set(codes(ev)) & {"unconfirmed_decay", "no_convergence"}, ev.flags
