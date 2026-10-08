@@ -1,6 +1,7 @@
 """The computer-science buttons: diff_test, growth (kit/04 s13-14, known answers kit/09 s1)."""
 import math
 import os
+import re
 import time
 
 import pytest
@@ -300,6 +301,19 @@ def test_the_same_exception_type_is_agreement_counted_separately_and_said_in_the
     assert "always_raised" in flags(ev)
 
 
+def test_a_hang_past_the_first_reports_does_not_name_a_wrong_function_or_input():
+    hang = "def f(n, _c=[0]):\n    _c[0] += 1\n    if _c[0] == 61:\n        while True:\n            pass\n    return n\n"
+    ev = run_child("diff_test", dict(fast=hang, reference="lambda n: n", inputs="integers(0, 10**6)",
+                                     examples=200, seed=7, edge=False), time_s=5.0)
+    assert ev.complete is False and ev.budget["stopped"] is True
+    assert "inside fast()" not in ev.scope and "inside reference()" not in ev.scope, ev.scope
+    m = re.search(r"as of input #(\d+) \(about (\d+) inputs had finished", ev.scope)
+    assert m, ev.scope
+    num, fin = int(m.group(1)), int(m.group(2))
+    assert 50 < num <= 61 and fin == num - 1, ev.scope        # the report predates or is the hanging input
+    assert "not reported" in ev.scope and "not known" in ev.scope, ev.scope
+
+
 def test_a_hung_fast_leaves_a_fresh_partial_that_names_the_input_in_flight():
     hang = "def f(n):\n    if n == 3:\n        while True:\n            pass\n    return n\n"
     ev = run_child("diff_test", dict(fast=hang, reference="lambda n: n", inputs="sampled_from([0, 1, 2, 3, 4])",
@@ -393,12 +407,13 @@ def test_nested_loop_fits_n_squared_cleanly():
     no_verdict_keys(ev)
 
 
-def test_sorted_on_random_lists_fits_n_log_n_or_n():
+def test_sorted_on_random_lists_fits_n_log_n_best():
     ev = ak.growth(fn="lambda xs: sorted(xs)", make_input=MAKE_RANDOM,
                    sizes=[2 ** k for k in range(10, 16)], repeats=3)
-    top2 = [c["class"] for c in ev.result["ranking"][:2]]
-    assert "n log n" in top2, ev.result["ranking"]
-    assert ev.result["best"] in ("n log n", "n")
+    ev = retry(lambda: ak.growth(fn="lambda xs: sorted(xs)", make_input=MAKE_RANDOM,
+                                 sizes=[2 ** k for k in range(10, 16)], repeats=3),
+               lambda e: e.result["best"] == "n log n", attempts=4)
+    assert ev.result["best"] == "n log n", ev.result["ranking"]
 
 
 def test_inputs_are_not_mutated_between_calls():
@@ -446,15 +461,39 @@ def test_default_sizes_on_sorted_are_a_clean_n_log_n_fit():
         return run("growth", dict(fn="lambda xs: sorted(xs)", make_input=MAKE_RANDOM), time_s=6.0)
 
     def clean(ev):
-        top2 = [c["class"] for c in ev.result["ranking"][:2]]
-        return "unreliable_fit" not in flags(ev) and "n log n" in top2
+        return "unreliable_fit" not in flags(ev) and ev.result["best"] == "n log n"
     ev = retry(make, clean, attempts=4)
     assert "unreliable_fit" not in flags(ev), (ev.flags, ev.result["ranking"][:3])
-    assert "n log n" in [c["class"] for c in ev.result["ranking"][:2]], ev.result["ranking"]
+    assert ev.result["best"] == "n log n", ev.result["ranking"]
     # the scope says which sizes the fit used, and the dropped small sizes are not among them
     fit_sizes = ev.result["fit_sizes"]
     assert fit_sizes and fit_sizes[-1] == ev.result["sizes"][-1] and fit_sizes[0] > ev.result["sizes"][0]
     assert "fit used" in ev.scope and str(fit_sizes[0]) in ev.scope and "overhead" in ev.scope
+
+
+SPIKE = ("def f(xs):\n    n = len(xs)\n    s = 0\n    for _ in range(40 if n == 64 else 1):\n"
+         "        for x in xs:\n            s += x * x % 7\n    return s\n")
+
+
+def test_a_spike_in_a_size_left_out_of_the_fit_is_flagged():
+    sizes = [2 ** k for k in range(4, 14)]          # 10 sizes; the fit keeps the larger half
+    ev = retry(lambda: ak.growth(fn=SPIKE, make_input=MAKE_LIST, sizes=sizes, repeats=3),
+               lambda e: "dropped_sizes_disagree" in flags(e), attempts=3)
+    assert 64 not in ev.result["fit_sizes"] and ev.result["fit_sizes"], ev.result["fit_sizes"]
+    assert "dropped_sizes_disagree" in flags(ev), (ev.flags, ev.result["median_s"])
+    assert 64 in [d["size"] for d in ev.result["dropped_disagree"]]
+    msg = next(f["message"] for f in ev.flags if f["code"] == "dropped_sizes_disagree")
+    assert "n = 64" in msg
+
+
+def test_clean_series_are_not_flagged_for_dropped_sizes():
+    ev = retry(lambda: ak.growth(fn=NESTED, make_input=MAKE_LIST, sizes=[16 * 2 ** k for k in range(8)], repeats=3),
+               lambda e: "dropped_sizes_disagree" not in flags(e))
+    assert "dropped_sizes_disagree" not in flags(ev), (ev.flags, ev.result["median_s"])
+    ev = retry(lambda: ak.growth(fn="lambda xs: sorted(xs)", make_input=MAKE_RANDOM,
+                                 sizes=[2 ** k for k in range(8, 17)], repeats=3),
+               lambda e: "dropped_sizes_disagree" not in flags(e))
+    assert "dropped_sizes_disagree" not in flags(ev), (ev.flags, ev.result["median_s"])
 
 
 def test_timings_at_the_call_overhead_name_no_class():

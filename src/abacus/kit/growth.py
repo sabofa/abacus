@@ -34,6 +34,7 @@ BATCH_TARGET_S = 2e-3           # a timed block of pure calls is made at least t
 RESERVE_S = 0.05
 POOR_FIT = 0.35                 # relative RMS residual above which no class describes the timings well
 TIMER_NOISE_S = 1e-4            # a slowest median under this is mostly timer and call overhead
+DROPPED_RATIO = 3.0             # a size left out of the fit that is this far above or below the fitted curve is flagged
 OVERHEAD_MULT = 20              # a size whose median is under this many call overheads is left out of the fit
 
 DESCRIPTION = (
@@ -48,7 +49,10 @@ DESCRIPTION = (
     "small n are unreliable; with fewer than 4 sizes no class is named. A function that changes its input gets a "
     "fresh copy for every timed call; one that does not is timed repeatedly on the same input, so a cache or "
     "memoised function is timed hot (the warm-up call fills it) and its growth is not what a first call would show. "
-    "A garbage collection runs before timed blocks (collection stays on). If the budget cuts a size short, that size's "
+    "A garbage collection runs before timed blocks (collection stays on); one that costs more than twice the block it "
+    "precedes runs once per size instead of before every block. When many sizes are above the overhead only the "
+    "larger half is fitted; if a size left out of the fit lies more than about 3 times above or below the fitted "
+    "curve, the flag dropped_sizes_disagree names it. If the budget cuts a size short, that size's "
     "median comes from fewer repeats and the result is incomplete. fn and make_input are Python code that is "
     "executed, not sandboxed."
 )
@@ -371,6 +375,15 @@ def _run(inp: dict, ctx) -> Evidence:
             notes.append(f"{best['class']} and {run_up['class']} fit about equally well "
                          f"({best['rms_log_residual']:.3f} and {run_up['rms_log_residual']:.3f}); "
                          "these sizes do not separate them")
+    if result["dropped_disagree"]:
+        dd = result["dropped_disagree"]
+        parts = [f"n = {d['size']} ({d['median_s']:.1e} s measured, {d['fitted_s']:.1e} s on the fitted "
+                 f"{rank[0]['class']} curve, {d['ratio']:.2g}x)" for d in dd]
+        msg = ("size(s) left out of the fit disagree with the fitted curve by more than "
+               f"{DROPPED_RATIO:g}x: " + "; ".join(parts) + ". The fit does not describe them (a spike, a "
+               "start-up or cache effect, or a change of growth); see median_s")
+        ev_flags.append(("dropped_sizes_disagree", msg))
+        notes.append(msg)
     notes.append("the classes are 1, log n, n, n log n, n^2, n^3 and 2^n only; a growth between them "
                  "(n^1.5, say) is shown as the nearest one")
 
@@ -426,6 +439,26 @@ def _run(inp: dict, ctx) -> Evidence:
     return ev
 
 
+def _dropped_disagree(best: dict, dropped: list[tuple[int, float]], overhead: float) -> list[dict]:
+    """The sizes left out of the fit (above the overhead floor, in the smaller half) whose median, overhead taken
+    off, is more than DROPPED_RATIO times the fitted curve's value or less than 1/DROPPED_RATIO of it."""
+    out = []
+    c = best["constant_s"]
+    if not (math.isfinite(c) and c > 0):
+        return out
+    for n, med in dropped:
+        try:
+            fitted = c * math.exp(CLASSES[best["class"]](n))
+        except OverflowError:
+            continue
+        t = med - overhead
+        if fitted > 0 and math.isfinite(fitted) and t > 0:
+            ratio = t / fitted
+            if ratio > DROPPED_RATIO or ratio < 1 / DROPPED_RATIO:
+                out.append({"size": n, "median_s": med, "fitted_s": fitted, "ratio": ratio})
+    return out
+
+
 def _result(sizes: list[int], medians: list[float], counts: list[int], overhead: float) -> dict:
     """The timings, and the ranking fitted on the sizes whose median is well above the call overhead (the overhead
     subtracted)."""
@@ -434,11 +467,12 @@ def _result(sizes: list[int], medians: list[float], counts: list[int], overhead:
     above = len(keep)
     if above >= 2 * MIN_SIZES:          # plenty of sizes: fit the larger half, where the growth shows (not the cache
         keep = keep[above - math.ceil(above / 2):]   # and start-up effects of the smaller ones)
+    dropped = [i for i in range(k) if i not in keep and medians[i] >= OVERHEAD_MULT * overhead]   # above the floor, not fitted
     fs = [sizes[i] for i in keep]
     ft = [medians[i] - overhead for i in keep]
     res: dict[str, Any] = {"sizes": list(sizes), "median_s": list(medians), "repeats": list(counts),
                            "overhead_s": overhead, "above_overhead": above, "fit_sizes": fs,
-                           "best": None, "runner_up": None, "fit": None, "ranking": []}
+                           "best": None, "runner_up": None, "fit": None, "ranking": [], "dropped_disagree": []}
     if len(fs) >= 2:
         rank = fit_classes(fs, ft)
         res["ranking"] = rank
@@ -446,6 +480,7 @@ def _result(sizes: list[int], medians: list[float], counts: list[int], overhead:
             res["best"], res["runner_up"] = rank[0]["class"], rank[1]["class"]
             res["fit"] = {"rms_log_residual": rank[0]["rms_log_residual"], "constant_s": rank[0]["constant_s"],
                           "runner_up_rms_log_residual": rank[1]["rms_log_residual"]}
+            res["dropped_disagree"] = _dropped_disagree(rank[0], [(sizes[i], medians[i]) for i in dropped], overhead)
     return res
 
 

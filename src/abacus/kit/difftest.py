@@ -533,11 +533,21 @@ class Runner:
             scope = (f"stopped at the time budget while shrinking, after all {self.ran} inputs had run; the "
                      "disagreements are shown as first found, not shrunk")
             return {"result": self.result(shown), "method": "sampled", "scope": scope}
-        scope = f"stopped at the time budget after {self.ran} inputs had finished; the rest were not run"
-        if self.inflight:
-            f = self.inflight
-            scope += (f". The last report was made inside {f['in']}() on input {f['input']!r} (input #{f['number']}); "
-                      "if it never returned, that call is where it stopped (inputs after the report may have run)")
+        f = self.inflight
+        if f and f["number"] <= REPORT_FIRST:
+            # every call of the first inputs is announced before it runs, so the last report is exact
+            scope = (f"stopped at the time budget after {self.ran} inputs had finished; the rest were not run. "
+                     f"The last report was made inside {f['in']}() on input {f['input']!r} (input #{f['number']}); "
+                     "if it never returned, that call is where it stopped")
+        elif f:
+            # later inputs are reported every REPORT_EVERY: the report is stale by up to that many inputs, and the
+            # call that was running may be any of fast/reference on any of them
+            scope = (f"stopped at the time budget without a result; the last report was made as of input "
+                     f"#{f['number']} (about {self.ran} inputs had finished, the count is from that report); the "
+                     f"hang is in that call or in one of the next {REPORT_EVERY - 1} inputs, which were not "
+                     "reported, so which function and which input are not known; the rest were not run")
+        else:
+            scope = f"stopped at the time budget after {self.ran} inputs had finished; the rest were not run"
         return {"result": self.result([]), "method": "sampled", "scope": scope}
 
     def result(self, shown: list[dict]) -> dict:
