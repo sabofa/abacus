@@ -2,7 +2,7 @@
 
 How an AI comes up with original problems, at the level of AMC 12, AIME, quant interviews and the math major, using the kit.
 
-**Status (2026-10-07):** brainstorming.
+**Status (2026-10-07):** brainstorming. A handoff for the fresh chat is in [`HANDOFF-2026-10-07.md`](HANDOFF-2026-10-07.md).
 - Ben has answered the constraint questions (below).
 - Three research passes are done ([`01-research-findings.md`](01-research-findings.md)).
 - **Next:** propose 2–3 approaches, then design the sections with Ben.
@@ -40,7 +40,7 @@ How an AI comes up with original problems, at the level of AMC 12, AIME, quant i
 |---|---|
 | B1 | **Keep all 14 buttons.** The buttons get built. `construct` still waits on spec 3's geometry design |
 | B2 | **No Lean or local prover for now**: "wait until i get a better computer (next year)". Spec 3 designs proof checking without them, with a slot to add them later |
-| B3 | **A one-time expert calibration.** Ben's precalc professor rates one set of 10–20 problems, once. Spec 3 treats it as a one-time calibration set; after that, Ben's own ratings carry it. Still to do: a one-page rating sheet. It mixes real past-contest problems and kit-made ones, unlabelled, at AMC 10/12 and AIME level, with a short rubric (well-posed? right difficulty? interesting rather than mechanical? would you use it?), and takes 30–45 minutes |
+| B3 | **A one-time expert calibration.** Ben's precalc professor rates one set of 10–20 problems, once. Spec 3 treats it as a one-time calibration set; after that, Ben's own ratings carry it. The sheet is drafted (see Files; draft, for Ben's check before printing). It mixes real past-contest problems and kit-made ones, unlabelled, at AMC 10/12 and AIME level, with a short rubric (well-posed? right difficulty? interesting rather than mechanical? would you use it?), and takes 30–45 minutes |
 | B4 | **OEIS is off by default**, as built |
 | B5 | **Osmosis keeps `tech:`** (a rendering requirement). Learn's technique tags and abacus use `technique:`. The Learn bank's tags get renamed only if spec 3 or export needs them, and the rename is noted when it happens |
 
@@ -60,3 +60,7 @@ How an AI comes up with original problems, at the level of AMC 12, AIME, quant i
 |---|---|
 | `00-README.md` | this: status, Ben's answers, open questions |
 | [`01-research-findings.md`](01-research-findings.md) | the three research passes of 2026-10-07, with sources, and what they point to |
+| [`HANDOFF-2026-10-07.md`](HANDOFF-2026-10-07.md) | where the brainstorm stands, the next steps, open items and the starter prompt for the fresh spec-3 chat |
+| [`rating-sheet.md`](rating-sheet.md) | B3: what the professor sees. 14 unlabelled problems (8 real past-contest, 6 kit-made) with a 1 to 5 rubric. Status: draft, for Ben's check before printing |
+| [`rating-sheet.pdf`](rating-sheet.pdf) | B3: the printable sheet (two sides of one letter page; headless Edge with KaTeX math). Does not contain the key. Status: draft, for Ben's check before printing |
+| [`rating-key.md`](rating-key.md) | B3: the separate answer key. Source of each problem (contest, year, number, or kit id, hash and seed), answer, intended difficulty, how each was checked, doubts. Do not show it to the rater. Status: draft, for Ben's check before printing |
